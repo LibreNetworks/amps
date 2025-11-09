@@ -92,7 +92,18 @@ def list_command(config):
 
     click.echo("Available Streams:")
     for stream in streams:
-        click.echo(f"  - ID: {stream['id']}, Name: {stream['name']}, Profile: {stream['ffmpeg_profile']}")
+        profile = stream.get('ffmpeg_profile')
+        custom = stream.get('custom_ffmpeg')
+
+        if custom and profile:
+            profile_label = f"{profile} (custom override)"
+        elif custom and not profile:
+            profile_label = "custom command"
+        else:
+            profile_label = profile or "—"
+
+        logo = stream.get('logo') or "—"
+        click.echo(f"  - ID: {stream['id']}, Name: {stream['name']}, Profile: {profile_label}, Logo: {logo}")
 
 if __name__ == '__main__':
     main_cli()

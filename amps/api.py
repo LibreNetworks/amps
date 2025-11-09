@@ -3,6 +3,67 @@
 from flask import Blueprint, jsonify, request, current_app
 from amps import ffmpeg_utils
 
+
+ALLOWED_STREAM_FIELDS = {
+    'name',
+    'source',
+    'ffmpeg_profile',
+    'logo',
+    'tvg_name',
+    'group',
+    'channel_number',
+    'next_programs',
+    'custom_ffmpeg',
+    'program_feed',
+    'description',
+}
+
+
+def _validate_custom_ffmpeg(custom_ffmpeg):
+    if custom_ffmpeg is None:
+        return True, None
+
+    if isinstance(custom_ffmpeg, str):
+        return True, None
+
+    if not isinstance(custom_ffmpeg, dict):
+        return False, "custom_ffmpeg must be a string command or mapping."
+
+    command = custom_ffmpeg.get('command')
+    if not command:
+        return False, "custom_ffmpeg requires a 'command' entry."
+
+    if not isinstance(command, (str, list)):
+        return False, "custom_ffmpeg 'command' must be a string or list of arguments."
+
+    env = custom_ffmpeg.get('env')
+    if env is not None and not isinstance(env, dict):
+        return False, "custom_ffmpeg 'env' must be a mapping of environment variables."
+
+    if 'shell' in custom_ffmpeg and not isinstance(custom_ffmpeg['shell'], bool):
+        return False, "custom_ffmpeg 'shell' must be a boolean if provided."
+
+    if 'cwd' in custom_ffmpeg and not isinstance(custom_ffmpeg['cwd'], str):
+        return False, "custom_ffmpeg 'cwd' must be a string if provided."
+
+    return True, None
+
+
+def _validate_next_programs(programs):
+    if programs is None:
+        return True, None
+
+    if not isinstance(programs, list):
+        return False, "next_programs must be a list of program objects."
+
+    for idx, program in enumerate(programs):
+        if not isinstance(program, dict):
+            return False, f"Program entry at index {idx} must be an object."
+        if 'title' not in program:
+            return False, f"Program entry at index {idx} missing required 'title'."
+
+    return True, None
+
 api_bp = Blueprint('api', __name__, url_prefix='/api')
 
 @api_bp.route('/streams', methods=['GET'])
@@ -22,21 +83,31 @@ def get_stream(stream_id):
 @api_bp.route('/streams', methods=['POST'])
 def add_stream():
     """Adds a new stream to the in-memory configuration."""
-    if not request.json or not all(k in request.json for k in ['name', 'source', 'ffmpeg_profile']):
-        return jsonify({'error': 'Missing required fields: name, source, ffmpeg_profile'}), 400
+    if not request.json or not all(k in request.json for k in ['name', 'source']):
+        return jsonify({'error': 'Missing required fields: name, source'}), 400
+
+    if 'ffmpeg_profile' not in request.json and 'custom_ffmpeg' not in request.json:
+        return jsonify({'error': "Provide either 'ffmpeg_profile' or 'custom_ffmpeg' for a stream."}), 400
 
     stream_map = current_app.config.get('stream_map', {})
     new_id = max(stream_map.keys()) + 1 if stream_map else 1
 
-    new_stream = {
-        'id': new_id,
-        'name': request.json['name'],
-        'source': request.json['source'],
-        'ffmpeg_profile': request.json['ffmpeg_profile']
-    }
+    new_stream = {'id': new_id}
+    for field in ALLOWED_STREAM_FIELDS:
+        if field in request.json:
+            new_stream[field] = request.json[field]
 
-    if new_stream['ffmpeg_profile'] not in current_app.config['ffmpeg_profiles']:
-         return jsonify({'error': f"ffmpeg_profile '{new_stream['ffmpeg_profile']}' not found"}), 400
+    if 'ffmpeg_profile' in new_stream:
+        if new_stream['ffmpeg_profile'] not in current_app.config['ffmpeg_profiles']:
+            return jsonify({'error': f"ffmpeg_profile '{new_stream['ffmpeg_profile']}' not found"}), 400
+
+    valid_custom, custom_error = _validate_custom_ffmpeg(new_stream.get('custom_ffmpeg'))
+    if not valid_custom:
+        return jsonify({'error': custom_error}), 400
+
+    valid_programs, programs_error = _validate_next_programs(new_stream.get('next_programs'))
+    if not valid_programs:
+        return jsonify({'error': programs_error}), 400
 
     stream_map[new_id] = new_stream
     return jsonify(new_stream), 201
@@ -52,14 +123,39 @@ def update_stream(stream_id):
         return jsonify({'error': 'Invalid JSON body'}), 400
 
     update_data = request.json
-    if 'ffmpeg_profile' in update_data and update_data['ffmpeg_profile'] not in current_app.config['ffmpeg_profiles']:
-        return jsonify({'error': f"ffmpeg_profile '{update_data['ffmpeg_profile']}' not found"}), 400
+    if 'ffmpeg_profile' in update_data:
+        if update_data['ffmpeg_profile'] not in current_app.config['ffmpeg_profiles']:
+            return jsonify({'error': f"ffmpeg_profile '{update_data['ffmpeg_profile']}' not found"}), 400
+
+    if 'custom_ffmpeg' in update_data:
+        valid_custom, custom_error = _validate_custom_ffmpeg(update_data.get('custom_ffmpeg'))
+        if not valid_custom:
+            return jsonify({'error': custom_error}), 400
+
+    if 'next_programs' in update_data:
+        valid_programs, programs_error = _validate_next_programs(update_data.get('next_programs'))
+        if not valid_programs:
+            return jsonify({'error': programs_error}), 400
 
     # Stop the old process if source or profile changes
-    if 'source' in update_data or 'ffmpeg_profile' in update_data:
+    if any(k in update_data for k in ['source', 'ffmpeg_profile', 'custom_ffmpeg']):
         ffmpeg_utils.stop_stream_process(stream_id)
 
-    stream_map[stream_id].update(update_data)
+    stream_entry = stream_map[stream_id]
+
+    # Update while respecting optional removals (None removes field)
+    for key, value in update_data.items():
+        if key == 'id':
+            continue
+        if key not in ALLOWED_STREAM_FIELDS | {'id'}:
+            stream_entry[key] = value
+            continue
+
+        if value is None and key in stream_entry:
+            stream_entry.pop(key)
+        else:
+            stream_entry[key] = value
+
     return jsonify(stream_map[stream_id])
 
 @api_bp.route('/streams/<int:stream_id>', methods=['DELETE'])
@@ -71,3 +167,27 @@ def delete_stream(stream_id):
         deleted_stream = stream_map.pop(stream_id)
         return jsonify({'message': 'Stream deleted successfully', 'stream': deleted_stream})
     return jsonify({'error': 'Stream not found'}), 404
+
+
+@api_bp.route('/streams/<int:stream_id>/programs', methods=['GET', 'PUT'])
+def manage_programs(stream_id):
+    """Retrieves or replaces the upcoming program schedule for a stream."""
+
+    stream_map = current_app.config.get('stream_map', {})
+    stream = stream_map.get(stream_id)
+
+    if not stream:
+        return jsonify({'error': 'Stream not found'}), 404
+
+    if request.method == 'GET':
+        return jsonify(stream.get('next_programs', []))
+
+    if not request.json:
+        return jsonify({'error': 'Invalid JSON body'}), 400
+
+    valid_programs, error = _validate_next_programs(request.json)
+    if not valid_programs:
+        return jsonify({'error': error}), 400
+
+    stream['next_programs'] = request.json
+    return jsonify(stream['next_programs'])

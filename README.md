@@ -8,10 +8,12 @@ It's designed to be a developer-friendly, modular, and robust solution for perso
 
 ## Features
 
-- **Dynamic M3U Playlists:** Serves a `/playlist.m3u` file compatible with most media players (VLC, Kodi, etc.).
+- **Dynamic M3U Playlists:** Serves a `/playlist.m3u` file compatible with most media players (VLC, Kodi, etc.) complete with channel names, logos, and custom metadata.
 - **FFmpeg Engine:** Relays streams (`copy` codec) or transcodes them on-the-fly to different bitrates, resolutions, or formats.
 - **YAML Configuration:** All streams and FFmpeg profiles are defined in a simple, human-readable `config.yaml`.
 - **REST API:** A simple API to list, add, update, and delete streams in-memory without restarting the server.
+- **Upcoming Programming:** Attach next-up schedules to channels and retrieve them through the API for live program feeds.
+- **Custom FFmpeg Pipelines:** Override the FFmpeg command per channel when you need full control over how the stream is produced.
 - **Token Authentication:** Secure your streams with a shared token, passed via headers or URL parameters.
 - **Robust Process Management:** Automatically restarts broken streams on request and gracefully cleans up FFmpeg processes on shutdown.
 - **Containerized:** Includes a `Dockerfile` for easy, production-ready deployment.
@@ -55,7 +57,7 @@ Amps consists of several key components:
     pip install -r requirements.txt
     ```
 4.  **Configure `config.yaml`:**
-    Modify the `config.yaml` file to add your streams and set a secure auth token.
+    Modify the `config.yaml` file to add your streams and set a secure auth token. Channels can now specify additional metadata such as logos, alternate guide names, upcoming programs, and even bespoke FFmpeg commands.
 
 5.  **Run the server:**
     ```bash
@@ -94,3 +96,45 @@ Open this URL in a browser or media player like VLC. You must provide the token.
 **cURL Example:**
 ```bash
 curl -L "http://localhost:5000/playlist.m3u?token=changeme123"
+```
+
+The playlist includes extended metadata when available:
+
+- `tvg-name`, `tvg-logo`, `group-title`, and `channel-number` attributes.
+- `#EXTREM:AMP-NEXT` lines for the next scheduled program (title, start time, description).
+- `#EXTREM:AMP-PROGRAM-FEED` linking to external schedule feeds.
+- `#EXTREM:AMP-DESCRIPTION` containing rich channel descriptions.
+
+Players that ignore custom tags will safely skip them, while companion applications can parse them for richer experiences.
+
+## Stream Configuration Reference
+
+Each entry in the `streams` list accepts the following keys:
+
+| Key | Required | Description |
+| --- | --- | --- |
+| `id` | ✅ | Unique integer identifier for the stream. |
+| `name` | ✅ | Display name for the channel. |
+| `source` | ✅ | Input URL or file path passed to FFmpeg. |
+| `ffmpeg_profile` | ✅* | Name of a profile defined under `ffmpeg_profiles`. Required unless `custom_ffmpeg` is supplied. |
+| `custom_ffmpeg` | ✅* | Optional override to launch a bespoke FFmpeg command instead of a profile. Accepts a string or mapping with `command`, `shell`, `cwd`, and `env` fields. The `{source}`, `{id}`, and `{name}` placeholders are expanded. |
+| `tvg_name` | | Alternate guide name used in playlist metadata. |
+| `logo` | | URL to the channel logo. |
+| `group` | | Logical group title for player UIs. |
+| `channel_number` | | Numeric channel identifier for compatible players. |
+| `description` | | Long-form description inserted as a custom playlist tag. |
+| `program_feed` | | URL to an external schedule feed for companion apps. |
+| `next_programs` | | List of upcoming program objects with at least a `title`, plus optional `start` and `description` fields. |
+
+> ℹ️ Provide either `ffmpeg_profile` or `custom_ffmpeg`. When both are supplied, the profile is still available for reference but the custom command takes precedence.
+
+### Managing Upcoming Programs via the API
+
+Use the new endpoint to fetch or replace the upcoming schedule for a channel without reloading configuration files:
+
+```
+GET  /api/streams/<id>/programs
+PUT  /api/streams/<id>/programs
+```
+
+The `PUT` body should be a JSON array of program objects. Each object must contain a `title` and can optionally include `start` and `description` fields.

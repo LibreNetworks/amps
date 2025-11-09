@@ -2,6 +2,7 @@
 
 import yaml
 import logging
+import copy
 
 DEFAULT_CONFIG = {
     'server': {
@@ -21,7 +22,7 @@ def load_config(config_path: str) -> dict:
     """
     Loads, validates, and provides defaults for the YAML configuration.
     """
-    config = DEFAULT_CONFIG
+    config = copy.deepcopy(DEFAULT_CONFIG)
     try:
         with open(config_path, 'r') as f:
             user_config = yaml.safe_load(f)

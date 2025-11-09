@@ -43,7 +43,39 @@ def create_app(config: dict) -> Flask:
 
         for stream in sorted(stream_map.values(), key=lambda s: s['id']):
             stream_url = f"{base_url.rstrip('/')}{url_for('stream_media', stream_id=stream['id'])}{auth_query}"
-            m3u_content.append(f'#EXTINF:-1 tvg-id="{stream["id"]}" tvg-name="{stream["name"]}",{stream["name"]}')
+            tvg_name = stream.get('tvg_name') or stream.get('name')
+            attributes = [f'tvg-id="{stream["id"]}"']
+            if tvg_name:
+                attributes.append(f'tvg-name="{tvg_name}"')
+            if stream.get('logo'):
+                attributes.append(f'tvg-logo="{stream["logo"]}"')
+            if stream.get('group'):
+                attributes.append(f'group-title="{stream["group"]}"')
+            if stream.get('channel_number'):
+                attributes.append(f'channel-number="{stream["channel_number"]}"')
+
+            display_name = stream.get('name')
+            m3u_content.append(f'#EXTINF:-1 {" ".join(attributes)},{display_name}')
+
+            next_programs = stream.get('next_programs') or []
+            if next_programs:
+                next_program = next_programs[0]
+                program_parts = []
+                if next_program.get('title'):
+                    program_parts.append(f'title="{next_program["title"]}"')
+                if next_program.get('start'):
+                    program_parts.append(f'start="{next_program["start"]}"')
+                if next_program.get('description'):
+                    program_parts.append(f'description="{next_program["description"]}"')
+                if program_parts:
+                    m3u_content.append(f'#EXTREM:AMP-NEXT {" ".join(program_parts)}')
+
+            if stream.get('program_feed'):
+                m3u_content.append(f'#EXTREM:AMP-PROGRAM-FEED url="{stream["program_feed"]}"')
+
+            if stream.get('description'):
+                m3u_content.append(f'#EXTREM:AMP-DESCRIPTION {stream["description"]}')
+
             m3u_content.append(stream_url)
 
         return Response('\n'.join(m3u_content), mimetype='application/vnd.apple.mpegurl')
@@ -57,11 +89,17 @@ def create_app(config: dict) -> Flask:
         if not stream_config:
             abort(404, description=f"Stream with ID {stream_id} not found.")
 
+        custom_ffmpeg = stream_config.get('custom_ffmpeg')
         ffmpeg_profile_name = stream_config.get('ffmpeg_profile')
-        ffmpeg_profile = app.config['ffmpeg_profiles'].get(ffmpeg_profile_name)
 
-        if not ffmpeg_profile:
-            abort(500, description=f"FFmpeg profile '{ffmpeg_profile_name}' not found for stream {stream_id}.")
+        if custom_ffmpeg:
+            ffmpeg_profile = app.config['ffmpeg_profiles'].get(ffmpeg_profile_name, {}) if ffmpeg_profile_name else {}
+        else:
+            if not ffmpeg_profile_name:
+                abort(500, description=f"Stream {stream_id} is missing an ffmpeg_profile configuration.")
+            ffmpeg_profile = app.config['ffmpeg_profiles'].get(ffmpeg_profile_name)
+            if not ffmpeg_profile:
+                abort(500, description=f"FFmpeg profile '{ffmpeg_profile_name}' not found for stream {stream_id}.")
 
         process = ffmpeg_utils.get_or_start_stream_process(stream_config, ffmpeg_profile)
 
