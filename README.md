@@ -18,6 +18,7 @@ It's designed to be a developer-friendly, modular, and robust solution for perso
 - **Robust Process Management:** Automatically restarts broken streams on request and gracefully cleans up FFmpeg processes on shutdown.
 - **Containerized:** Includes a `Dockerfile` for easy, production-ready deployment.
 - **CLI Interface:** Manage the server with simple commands like `amps serve` and `amps list`.
+- **Scheduled Streams:** Define time-bound channels that automatically activate and retire using APScheduler.
 
 ## Architecture
 
@@ -57,7 +58,7 @@ Amps consists of several key components:
     pip install -r requirements.txt
     ```
 4.  **Configure `config.yaml`:**
-    Modify the `config.yaml` file to add your streams and set a secure auth token. Channels can now specify additional metadata such as logos, alternate guide names, upcoming programs, and even bespoke FFmpeg commands.
+    Modify the `config.yaml` file to add your streams, scheduled stream windows, and set a secure auth token. Channels can now specify additional metadata such as logos, alternate guide names, upcoming programs, and even bespoke FFmpeg commands.
 
 5.  **Run the server:**
     ```bash
@@ -127,6 +128,29 @@ Each entry in the `streams` list accepts the following keys:
 | `next_programs` | | List of upcoming program objects with at least a `title`, plus optional `start` and `description` fields. |
 
 > ℹ️ Provide either `ffmpeg_profile` or `custom_ffmpeg`. When both are supplied, the profile is still available for reference but the custom command takes precedence.
+
+### Scheduled Streams
+
+Use the optional `scheduled_streams` section in your configuration to create channels that appear only inside specific windows. The server relies on [APScheduler](https://apscheduler.readthedocs.io/en/3.x/) to activate and deactivate these channels without restarts.
+
+Example configuration snippet:
+
+```yaml
+scheduled_streams:
+  - id: 900
+    name: "Community Spotlight"
+    ffmpeg_profile: hls-transcode
+    source: https://example.com/community_spotlight.m3u8
+    schedule:
+      start: "2024-05-04T18:00:00Z"
+      end: "2024-05-04T20:00:00Z"
+```
+
+- `start` and `end` accept ISO-8601 timestamps (`YYYY-MM-DDTHH:MM:SSZ`).
+- When the current time passes the `start`, the stream is added to the in-memory map just like static entries.
+- When the `end` time is reached, the stream is removed and any running FFmpeg process is stopped.
+- If `start` is omitted or in the past, the stream activates immediately; omit `end` to keep the channel active indefinitely.
+- Scheduled streams cannot reuse IDs from the always-on `streams` section—duplicates are ignored with a warning.
 
 ### Managing Upcoming Programs via the API
 

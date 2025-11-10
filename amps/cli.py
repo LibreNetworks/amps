@@ -40,6 +40,9 @@ def serve_command(config):
     else:
         print("🔓 Authentication: Disabled")
     print(f"📡 Serving {len(app_config['stream_map'])} streams at http://{host}:{port}")
+    scheduled_count = len(app_config.get('scheduled_streams', []))
+    if scheduled_count:
+        print(f"🕒 {scheduled_count} scheduled stream(s) configured")
     if debug:
         print("⚠️  Running in DEBUG mode. Do not use in production.")
     print("---" * 10)

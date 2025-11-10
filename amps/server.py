@@ -2,11 +2,62 @@
 
 import time
 import logging
+import atexit
+import copy
+from datetime import datetime, timezone
+from typing import Optional
+
+from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, Response, request, abort, url_for, jsonify
+
 from amps import ffmpeg_utils
 from amps.api import api_bp
 
 START_TIME = time.time()
+
+
+def _parse_schedule_datetime(value, stream_label: str, field_name: str) -> Optional[datetime]:
+    """Parses ISO-8601 datetime strings into aware UTC datetime objects."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        candidate = value.strip()
+        if candidate.endswith('Z'):
+            candidate = candidate[:-1] + '+00:00'
+        try:
+            dt = datetime.fromisoformat(candidate)
+        except ValueError:
+            logging.error(
+                "Scheduled stream '%s' has invalid %s '%s'. Expected ISO-8601 format.",
+                stream_label,
+                field_name,
+                value,
+            )
+            return None
+    else:
+        logging.error(
+            "Scheduled stream '%s' has unsupported %s type '%s'.",
+            stream_label,
+            field_name,
+            type(value).__name__,
+        )
+        return None
+
+    if dt.tzinfo is None:
+        logging.warning(
+            "Scheduled stream '%s' %s '%s' is naive. Assuming UTC.",
+            stream_label,
+            field_name,
+            value,
+        )
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(timezone.utc)
+
 
 def create_app(config: dict) -> Flask:
     """
@@ -14,9 +65,137 @@ def create_app(config: dict) -> Flask:
     """
     app = Flask(__name__)
     app.config.update(config)
+    app.config.setdefault('stream_map', {})
+    app.config.setdefault('scheduled_streams', [])
 
     # Register API blueprint
     app.register_blueprint(api_bp)
+
+    scheduler = BackgroundScheduler()
+    scheduler.start()
+    app.extensions['apscheduler'] = scheduler
+
+    def shutdown_scheduler():
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+
+    atexit.register(shutdown_scheduler)
+
+    def activate_scheduled_stream(stream_id: int, stream_definition: dict):
+        stream_map = app.config.setdefault('stream_map', {})
+        if stream_id in stream_map:
+            logging.info(
+                "Scheduled stream '%s' (ID %s) is already active.",
+                stream_definition.get('name', stream_id),
+                stream_id,
+            )
+            return
+
+        stream_map[stream_id] = copy.deepcopy(stream_definition)
+        logging.info(
+            "Activated scheduled stream '%s' (ID %s).",
+            stream_definition.get('name', stream_id),
+            stream_id,
+        )
+
+    def deactivate_scheduled_stream(stream_id: int):
+        stream_map = app.config.setdefault('stream_map', {})
+        stream_definition = stream_map.get(stream_id)
+        if not stream_definition:
+            return
+
+        ffmpeg_utils.stop_stream_process(stream_id)
+        stream_map.pop(stream_id, None)
+        logging.info(
+            "Deactivated scheduled stream '%s' (ID %s).",
+            stream_definition.get('name', stream_id),
+            stream_id,
+        )
+
+    def setup_scheduled_streams():
+        scheduled_streams = app.config.get('scheduled_streams', [])
+        if not scheduled_streams:
+            return
+
+        now = datetime.now(timezone.utc)
+        base_stream_ids = {
+            stream['id']
+            for stream in app.config.get('streams', [])
+            if isinstance(stream, dict) and 'id' in stream
+        }
+
+        for entry in scheduled_streams:
+            if not isinstance(entry, dict):
+                logging.error("Skipping malformed scheduled stream definition: %s", entry)
+                continue
+
+            stream_id = entry.get('id')
+            if stream_id is None:
+                logging.error("Scheduled stream missing required 'id': %s", entry)
+                continue
+
+            if stream_id in base_stream_ids:
+                logging.warning(
+                    "Skipping scheduled stream '%s' (ID %s) because a static stream with the same ID exists.",
+                    entry.get('name', stream_id),
+                    stream_id,
+                )
+                continue
+
+            schedule_conf = entry.get('schedule', {}) or {}
+            stream_label = entry.get('name', stream_id)
+            start_dt = _parse_schedule_datetime(schedule_conf.get('start'), stream_label, 'start time')
+            end_dt = _parse_schedule_datetime(schedule_conf.get('end'), stream_label, 'end time')
+
+            if start_dt and end_dt and end_dt <= start_dt:
+                logging.warning(
+                    "Scheduled stream '%s' (ID %s) has an end time before the start time. Skipping.",
+                    stream_label,
+                    stream_id,
+                )
+                continue
+
+            stream_definition = copy.deepcopy(entry)
+
+            if end_dt and end_dt <= now:
+                deactivate_scheduled_stream(stream_id)
+                continue
+
+            if not start_dt or start_dt <= now:
+                activate_scheduled_stream(stream_id, stream_definition)
+            else:
+                scheduler.add_job(
+                    activate_scheduled_stream,
+                    trigger='date',
+                    run_date=start_dt,
+                    args=[stream_id, stream_definition],
+                    id=f'stream_{stream_id}_activate',
+                    replace_existing=True,
+                )
+                logging.info(
+                    "Scheduled activation for stream '%s' (ID %s) at %s.",
+                    stream_label,
+                    stream_id,
+                    start_dt.isoformat(),
+                )
+
+            if end_dt:
+                scheduler.add_job(
+                    deactivate_scheduled_stream,
+                    trigger='date',
+                    run_date=end_dt,
+                    args=[stream_id],
+                    id=f'stream_{stream_id}_deactivate',
+                    replace_existing=True,
+                )
+                logging.info(
+                    "Scheduled deactivation for stream '%s' (ID %s) at %s.",
+                    stream_label,
+                    stream_id,
+                    end_dt.isoformat(),
+                )
+
+    setup_scheduled_streams()
 
     @app.before_request
     def auth_middleware():
