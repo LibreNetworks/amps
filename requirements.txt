@@ -1,5 +1,6 @@
 Flask>=2.0
 ffmpeg-python>=0.2.0
+yt-dlp>=2024.4.9
 PyYAML>=5.0
 click>=8.0
 gunicorn>=20.0

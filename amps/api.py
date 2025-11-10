@@ -16,6 +16,11 @@ ALLOWED_STREAM_FIELDS = {
     'custom_ffmpeg',
     'program_feed',
     'description',
+    'input_options',
+    'input_args',
+    'source_handler',
+    'use_yt_dlp',
+    'yt_dlp_format',
 }
 
 
@@ -45,6 +50,49 @@ def _validate_custom_ffmpeg(custom_ffmpeg):
 
     if 'cwd' in custom_ffmpeg and not isinstance(custom_ffmpeg['cwd'], str):
         return False, "custom_ffmpeg 'cwd' must be a string if provided."
+
+    return True, None
+
+
+def _validate_source_handler(handler):
+    if handler is None:
+        return True, None
+
+    if not isinstance(handler, dict):
+        return False, "source_handler must be an object with handler configuration."
+
+    handler_type = (handler.get('type') or '').lower()
+
+    if handler_type != 'yt_dlp':
+        return False, f"Unsupported source_handler type '{handler.get('type')}'."
+
+    fmt = handler.get('format')
+    if fmt is not None and not isinstance(fmt, str):
+        return False, "source_handler.format must be a string when provided."
+
+    options = handler.get('options')
+    if options is not None and not isinstance(options, dict):
+        return False, "source_handler.options must be an object mapping yt-dlp settings."
+
+    return True, None
+
+
+def _validate_input_options(options):
+    if options is None:
+        return True, None
+
+    if not isinstance(options, dict):
+        return False, "input_options must be an object mapping FFmpeg input keywords."
+
+    return True, None
+
+
+def _validate_input_args(args):
+    if args is None:
+        return True, None
+
+    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+        return False, "input_args must be a list of strings."
 
     return True, None
 
@@ -105,6 +153,24 @@ def add_stream():
     if not valid_custom:
         return jsonify({'error': custom_error}), 400
 
+    if 'use_yt_dlp' in new_stream and not isinstance(new_stream['use_yt_dlp'], bool):
+        return jsonify({'error': 'use_yt_dlp must be a boolean value.'}), 400
+
+    if 'yt_dlp_format' in new_stream and new_stream['yt_dlp_format'] is not None and not isinstance(new_stream['yt_dlp_format'], str):
+        return jsonify({'error': 'yt_dlp_format must be a string when provided.'}), 400
+
+    valid_handler, handler_error = _validate_source_handler(new_stream.get('source_handler'))
+    if not valid_handler:
+        return jsonify({'error': handler_error}), 400
+
+    valid_input_options, input_options_error = _validate_input_options(new_stream.get('input_options'))
+    if not valid_input_options:
+        return jsonify({'error': input_options_error}), 400
+
+    valid_input_args, input_args_error = _validate_input_args(new_stream.get('input_args'))
+    if not valid_input_args:
+        return jsonify({'error': input_args_error}), 400
+
     valid_programs, programs_error = _validate_next_programs(new_stream.get('next_programs'))
     if not valid_programs:
         return jsonify({'error': programs_error}), 400
@@ -131,6 +197,27 @@ def update_stream(stream_id):
         valid_custom, custom_error = _validate_custom_ffmpeg(update_data.get('custom_ffmpeg'))
         if not valid_custom:
             return jsonify({'error': custom_error}), 400
+
+    if 'use_yt_dlp' in update_data and not isinstance(update_data['use_yt_dlp'], bool):
+        return jsonify({'error': 'use_yt_dlp must be a boolean value.'}), 400
+
+    if 'yt_dlp_format' in update_data and update_data['yt_dlp_format'] is not None and not isinstance(update_data['yt_dlp_format'], str):
+        return jsonify({'error': 'yt_dlp_format must be a string when provided.'}), 400
+
+    if 'source_handler' in update_data:
+        valid_handler, handler_error = _validate_source_handler(update_data.get('source_handler'))
+        if not valid_handler:
+            return jsonify({'error': handler_error}), 400
+
+    if 'input_options' in update_data:
+        valid_input_options, input_options_error = _validate_input_options(update_data.get('input_options'))
+        if not valid_input_options:
+            return jsonify({'error': input_options_error}), 400
+
+    if 'input_args' in update_data:
+        valid_input_args, input_args_error = _validate_input_args(update_data.get('input_args'))
+        if not valid_input_args:
+            return jsonify({'error': input_args_error}), 400
 
     if 'next_programs' in update_data:
         valid_programs, programs_error = _validate_next_programs(update_data.get('next_programs'))
