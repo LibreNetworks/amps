@@ -10,10 +10,12 @@ It's designed to be a developer-friendly, modular, and robust solution for perso
 
 - **Dynamic M3U Playlists:** Serves a `/playlist.m3u` file compatible with most media players (VLC, Kodi, etc.) complete with channel names, logos, and custom metadata.
 - **FFmpeg Engine:** Relays streams (`copy` codec) or transcodes them on-the-fly to different bitrates, resolutions, or formats.
+- **yt-dlp Integration:** Resolve complex streaming services (YouTube, Twitch, etc.) into direct FFmpeg inputs on demand.
 - **YAML Configuration:** All streams and FFmpeg profiles are defined in a simple, human-readable `config.yaml`.
 - **REST API:** A simple API to list, add, update, and delete streams in-memory without restarting the server.
 - **Upcoming Programming:** Attach next-up schedules to channels and retrieve them through the API for live program feeds.
 - **Custom FFmpeg Pipelines:** Override the FFmpeg command per channel when you need full control over how the stream is produced.
+- **Protocol-Friendly Inputs:** Add FFmpeg input options to unlock RTMP, DVB/IP, DTV, multicast and other specialised transports.
 - **Token Authentication:** Secure your streams with a shared token, passed via headers or URL parameters.
 - **Robust Process Management:** Automatically restarts broken streams on request and gracefully cleans up FFmpeg processes on shutdown.
 - **Containerized:** Includes a `Dockerfile` for easy, production-ready deployment.
@@ -126,8 +128,62 @@ Each entry in the `streams` list accepts the following keys:
 | `description` | | Long-form description inserted as a custom playlist tag. |
 | `program_feed` | | URL to an external schedule feed for companion apps. |
 | `next_programs` | | List of upcoming program objects with at least a `title`, plus optional `start` and `description` fields. |
+| `use_yt_dlp` | | Convenience flag to resolve `source` with yt-dlp before launching FFmpeg. |
+| `yt_dlp_format` | | Override the yt-dlp format selector (defaults to `best`). |
+| `source_handler` | | Advanced yt-dlp configuration mapping (`type: yt_dlp`, optional `format`, `options`, ...). |
+| `input_options` | | Mapping of keyword arguments passed to `ffmpeg.input` (e.g. `protocol_whitelist`, `rtmp_live`). |
+| `input_args` | | Additional positional arguments for `ffmpeg.input` enabling flags such as `-stream_loop`. |
 
 > ℹ️ Provide either `ffmpeg_profile` or `custom_ffmpeg`. When both are supplied, the profile is still available for reference but the custom command takes precedence.
+
+### Advanced Input Handling
+
+- `use_yt_dlp` / `source_handler`: Automatically resolve the `source` URL through [yt-dlp](https://github.com/yt-dlp/yt-dlp) so you can restream providers like YouTube, Twitch, Facebook Live, and more. The resolved URL and headers are refreshed every time a new FFmpeg process starts.
+- `input_options` / `input_args`: Fine-tune how FFmpeg opens the stream, enabling RTMP authentication (`rtmp_conn`, `rtmp_app`), IPTV transports (`protocol_whitelist: "file,udp,rtp,tcp,tls,http,https,rtmp,rtsp"`), satellite/digital TV inputs, multicast, etc.
+
+#### yt-dlp Example
+
+```yaml
+- id: 10
+  name: "YouTube Live Demo"
+  source: "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+  ffmpeg_profile: copy
+  use_yt_dlp: true
+  input_options:
+    protocol_whitelist: "file,http,https,tcp,tls,crypto"
+```
+
+For more control, switch to the richer `source_handler` form:
+
+```yaml
+- id: 11
+  name: "Twitch with yt-dlp"
+  source: "https://www.twitch.tv/nasa"
+  ffmpeg_profile: copy
+  source_handler:
+    type: yt_dlp
+    format: "best"
+    options:
+      live_from_start: true
+      retries: 3
+  input_options:
+    protocol_whitelist: "file,http,https,tcp,tls,crypto"
+```
+
+Use `input_args` for flags that do not take values as key-value pairs:
+
+```yaml
+- id: 12
+  name: "RTMP ingest"
+  source: "rtmp://example.com/live/feed"
+  ffmpeg_profile: copy
+  input_options:
+    rtmp_live: live
+  input_args:
+    - "-re"
+```
+
+These controls make it straightforward to connect to RTMP, DVB-IP, DTV, or other specialised transports without falling back to a full custom command.
 
 ### Scheduled Streams
 

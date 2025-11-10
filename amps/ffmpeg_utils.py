@@ -6,11 +6,99 @@ import subprocess
 import threading
 import atexit
 import shlex
-from typing import Dict, Optional, Tuple, Union, List
+from typing import Dict, Optional, Tuple, Union, List, Any
+
+try:
+    import yt_dlp
+except ImportError:  # pragma: no cover - dependency should be installed, but guard just in case
+    yt_dlp = None
 
 # Global dictionary to hold running FFmpeg processes and associated data
 # Structure: { stream_id: {'process': Popen_object, 'lock': Lock_object} }
 RUNNING_PROCESSES: Dict[int, Dict] = {}
+
+
+def _resolve_stream_source(stream_config: dict) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Resolves the input source for FFmpeg, optionally using yt-dlp."""
+
+    source = stream_config.get('source')
+    if not source:
+        logging.error("Stream '%s' is missing a source URL.", stream_config.get('name', stream_config.get('id')))
+        return None, {}
+
+    # Normalised configuration for yt-dlp usage. We support either the legacy
+    # `use_yt_dlp` boolean or the richer `source_handler` mapping.
+    handler_conf = stream_config.get('source_handler') or {}
+
+    if stream_config.get('use_yt_dlp') and not handler_conf:
+        handler_conf = {
+            'type': 'yt_dlp',
+            'format': stream_config.get('yt_dlp_format')
+        }
+
+    handler_type = (handler_conf.get('type') or '').lower()
+
+    if handler_type != 'yt_dlp':
+        return source, {}
+
+    if yt_dlp is None:
+        logging.error(
+            "yt-dlp support requested for stream '%s', but the package is not available.",
+            stream_config.get('name', stream_config.get('id')),
+        )
+        return None, {}
+
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'format': handler_conf.get('format') or 'best',
+        'noplaylist': True,
+        'cachedir': False,
+        'skip_download': True,
+    }
+
+    # Allow users to pass additional yt-dlp options via `options` mapping.
+    extra_opts = handler_conf.get('options')
+    if isinstance(extra_opts, dict):
+        ydl_opts.update(extra_opts)
+
+    stream_label = stream_config.get('name', stream_config.get('id'))
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(source, download=False)
+    except Exception as exc:  # pragma: no cover - network errors/environment specific
+        logging.error("yt-dlp failed to extract stream for '%s': %s", stream_label, exc)
+        return None, {}
+
+    if not info:
+        logging.error("yt-dlp did not return stream information for '%s'.", stream_label)
+        return None, {}
+
+    if 'entries' in info:
+        entries = info.get('entries') or []
+        info = next((entry for entry in entries if entry), None)
+        if not info:
+            logging.error("yt-dlp returned an empty playlist for '%s'.", stream_label)
+            return None, {}
+
+    resolved = info.get('url') or info.get('manifest_url')
+    if not resolved:
+        logging.error("yt-dlp did not provide a playable URL for '%s'.", stream_label)
+        return None, {}
+
+    input_overrides: Dict[str, Any] = {}
+
+    headers = info.get('http_headers')
+    if headers:
+        header_lines = ''.join(f"{key}: {value}\r\n" for key, value in headers.items())
+        input_overrides['headers'] = header_lines
+
+    protocol = info.get('protocol')
+    if protocol and protocol.startswith('m3u8'):
+        input_overrides.setdefault('protocol_whitelist', 'file,http,https,tcp,tls,crypto')
+
+    return resolved, input_overrides
 
 
 def _prepare_custom_ffmpeg_command(stream_config: dict) -> Optional[Tuple[Union[str, List[str]], bool, Optional[dict], Optional[str]]]:
@@ -108,8 +196,42 @@ def get_or_start_stream_process(stream_config: dict, ffmpeg_profile: dict) -> Op
                 )
                 logging.info(f"Custom FFmpeg process started for '{stream_name}' with PID: {process.pid}")
             else:
-                # Build ffmpeg-python command
-                input_stream = ffmpeg.input(stream_config['source'])
+                resolved_source, handler_options = _resolve_stream_source(stream_config)
+                if not resolved_source:
+                    logging.error(
+                        "Could not resolve an input source for stream '%s'.", stream_name
+                    )
+                    return None
+
+                input_kwargs: Dict[str, Any] = {}
+                input_kwargs.update(handler_options)
+
+                configured_options = stream_config.get('input_options') or {}
+                if configured_options and not isinstance(configured_options, dict):
+                    logging.error(
+                        "Stream '%s' has non-mapping input_options; ignoring the value.",
+                        stream_name,
+                    )
+                else:
+                    input_kwargs.update(configured_options)
+
+                input_args = stream_config.get('input_args') or []
+                if input_args and not isinstance(input_args, list):
+                    logging.error(
+                        "Stream '%s' input_args must be a list of arguments; ignoring.",
+                        stream_name,
+                    )
+                    input_args = []
+
+                logging.debug(
+                    "FFmpeg input for '%s': source=%s, args=%s, options=%s",
+                    stream_name,
+                    resolved_source,
+                    input_args,
+                    input_kwargs,
+                )
+
+                input_stream = ffmpeg.input(resolved_source, *input_args, **input_kwargs)
                 output_stream = ffmpeg.output(input_stream, 'pipe:1', **ffmpeg_profile)
 
                 process = output_stream.run_async(pipe_stdout=True, pipe_stderr=True)

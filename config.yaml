@@ -47,6 +47,14 @@ streams:
       command: "ffmpeg -re -i {source} -c copy -metadata service_name='Dolby Atmos Demo' -f mpegts pipe:1"
       shell: false
 
+  - id: 4
+    name: "YouTube (yt-dlp)"
+    source: "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+    ffmpeg_profile: "copy"
+    use_yt_dlp: true
+    input_options:
+      protocol_whitelist: "file,http,https,tcp,tls,crypto"
+
 # Reusable FFmpeg command profiles. The options are passed to ffmpeg-python's .output() method.
 ffmpeg_profiles:
   copy:
