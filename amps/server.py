@@ -6,12 +6,21 @@ import atexit
 import copy
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlencode
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, Response, request, abort, url_for, jsonify
 
 from amps import ffmpeg_utils
 from amps.api import api_bp
+from amps.stream_utils import (
+    extract_region_from_request,
+    filter_streams,
+    parse_group_filter,
+    parse_id_filter,
+    is_stream_allowed_for_region,
+)
+from amps.epg_utils import build_xmltv
 
 START_TIME = time.time()
 
@@ -197,6 +206,24 @@ def create_app(config: dict) -> Flask:
 
     setup_scheduled_streams()
 
+    def build_stream_url(stream_id: int, extra_params: Optional[dict] = None) -> str:
+        """Constructs an absolute streaming URL with auth and optional query args."""
+
+        query_params = {}
+        if app.config['auth']['enabled']:
+            query_params['token'] = app.config['auth']['token']
+
+        if extra_params:
+            for key, value in extra_params.items():
+                if value is None:
+                    continue
+                query_params[key] = value
+
+        stream_url = url_for('stream_media', stream_id=stream_id, _external=True)
+        if query_params:
+            return f"{stream_url}?{urlencode(query_params)}"
+        return stream_url
+
     @app.before_request
     def auth_middleware():
         """Enforces token authentication on protected routes."""
@@ -210,20 +237,25 @@ def create_app(config: dict) -> Flask:
 
     @app.route('/playlist.m3u')
     def generate_playlist():
-        """Generates a dynamic M3U playlist."""
+        """Generates a dynamic, filterable M3U playlist."""
+
         m3u_content = ['#EXTM3U']
-        base_url = request.host_url
-
-        # Add token to URL if auth is enabled
-        auth_query = f"?token={app.config['auth']['token']}" if app.config['auth']['enabled'] else ""
-
-        # Use the in-memory map which can be modified by the API
         stream_map = app.config.get('stream_map', {})
+        region = extract_region_from_request(request)
+        groups = parse_group_filter(request.args.get('group'))
+        ids = parse_id_filter(request.args.get('ids'))
+        include_variants = request.args.get('variants', 'true').lower() not in {'false', '0', 'no'}
 
-        for stream in sorted(stream_map.values(), key=lambda s: s['id']):
-            stream_url = f"{base_url.rstrip('/')}{url_for('stream_media', stream_id=stream['id'])}{auth_query}"
+        base_query = {}
+        if region:
+            base_query['region'] = region
+
+        filtered_streams = sorted(filter_streams(stream_map.values(), region, groups, ids), key=lambda s: s['id'])
+
+        for stream in filtered_streams:
             tvg_name = stream.get('tvg_name') or stream.get('name')
-            attributes = [f'tvg-id="{stream["id"]}"']
+            channel_identifier = stream.get('epg_id') or stream.get('tvg_id') or stream.get('id')
+            attributes = [f'tvg-id="{channel_identifier}"']
             if tvg_name:
                 attributes.append(f'tvg-name="{tvg_name}"')
             if stream.get('logo'):
@@ -233,29 +265,66 @@ def create_app(config: dict) -> Flask:
             if stream.get('channel_number'):
                 attributes.append(f'channel-number="{stream["channel_number"]}"')
 
-            display_name = stream.get('name')
-            m3u_content.append(f'#EXTINF:-1 {" ".join(attributes)},{display_name}')
+            entries = [
+                {
+                    'name': stream.get('name'),
+                    'params': {},
+                    'variant': None,
+                }
+            ]
 
-            next_programs = stream.get('next_programs') or []
-            if next_programs:
-                next_program = next_programs[0]
-                program_parts = []
-                if next_program.get('title'):
-                    program_parts.append(f'title="{next_program["title"]}"')
-                if next_program.get('start'):
-                    program_parts.append(f'start="{next_program["start"]}"')
-                if next_program.get('description'):
-                    program_parts.append(f'description="{next_program["description"]}"')
-                if program_parts:
-                    m3u_content.append(f'#EXTREM:AMP-NEXT {" ".join(program_parts)}')
+            if include_variants:
+                for variant in stream.get('adaptive_bitrates') or []:
+                    variant_name = variant.get('name')
+                    if not variant_name:
+                        continue
+                    label = variant.get('label') or variant_name.upper()
+                    entries.append({
+                        'name': f"{stream.get('name')} ({label})",
+                        'params': {'variant': variant_name},
+                        'variant': variant_name,
+                    })
 
-            if stream.get('program_feed'):
-                m3u_content.append(f'#EXTREM:AMP-PROGRAM-FEED url="{stream["program_feed"]}"')
+            for entry in entries:
+                query = dict(base_query)
+                query.update(entry['params'])
+                stream_url = build_stream_url(stream['id'], query)
+                m3u_content.append(f'#EXTINF:-1 {" ".join(attributes)},{entry["name"]}')
 
-            if stream.get('description'):
-                m3u_content.append(f'#EXTREM:AMP-DESCRIPTION {stream["description"]}')
+                if entry['variant']:
+                    m3u_content.append(f'#EXTREM:AMP-VARIANT name="{entry["variant"]}"')
 
-            m3u_content.append(stream_url)
+                next_programs = stream.get('next_programs') or []
+                if next_programs:
+                    next_program = next_programs[0]
+                    program_parts = []
+                    if next_program.get('title'):
+                        program_parts.append(f'title="{next_program["title"]}"')
+                    if next_program.get('start'):
+                        program_parts.append(f'start="{next_program["start"]}"')
+                    if next_program.get('description'):
+                        program_parts.append(f'description="{next_program["description"]}"')
+                    if program_parts:
+                        m3u_content.append(f'#EXTREM:AMP-NEXT {" ".join(program_parts)}')
+
+                if stream.get('program_feed'):
+                    m3u_content.append(f'#EXTREM:AMP-PROGRAM-FEED url="{stream["program_feed"]}"')
+
+                if stream.get('description'):
+                    m3u_content.append(f'#EXTREM:AMP-DESCRIPTION {stream["description"]}')
+
+                if stream.get('regions_allowed') or stream.get('regions_blocked'):
+                    allowed = ','.join(stream.get('regions_allowed') or [])
+                    blocked = ','.join(stream.get('regions_blocked') or [])
+                    region_parts = []
+                    if allowed:
+                        region_parts.append(f'allow={allowed}')
+                    if blocked:
+                        region_parts.append(f'block={blocked}')
+                    if region_parts:
+                        m3u_content.append(f'#EXTREM:AMP-REGION {" ".join(region_parts)}')
+
+                m3u_content.append(stream_url)
 
         return Response('\n'.join(m3u_content), mimetype='application/vnd.apple.mpegurl')
 
@@ -268,8 +337,30 @@ def create_app(config: dict) -> Flask:
         if not stream_config:
             abort(404, description=f"Stream with ID {stream_id} not found.")
 
-        custom_ffmpeg = stream_config.get('custom_ffmpeg')
-        ffmpeg_profile_name = stream_config.get('ffmpeg_profile')
+        region = extract_region_from_request(request)
+        if not is_stream_allowed_for_region(stream_config, region):
+            abort(403, description=f"Stream {stream_id} is not available in your region.")
+
+        variant_name = request.args.get('variant')
+        variant_config = None
+        selected_stream_config = stream_config
+
+        if variant_name:
+            for candidate in stream_config.get('adaptive_bitrates') or []:
+                if candidate.get('name') == variant_name:
+                    variant_config = candidate
+                    break
+
+            if not variant_config:
+                abort(404, description=f"Variant '{variant_name}' not found for stream {stream_id}.")
+
+            selected_stream_config = copy.deepcopy(stream_config)
+            for field in ['ffmpeg_profile', 'custom_ffmpeg', 'source', 'input_options', 'input_args', 'source_handler', 'use_yt_dlp', 'yt_dlp_format']:
+                if field in variant_config:
+                    selected_stream_config[field] = variant_config[field]
+
+        custom_ffmpeg = selected_stream_config.get('custom_ffmpeg')
+        ffmpeg_profile_name = selected_stream_config.get('ffmpeg_profile')
 
         if custom_ffmpeg:
             ffmpeg_profile = app.config['ffmpeg_profiles'].get(ffmpeg_profile_name, {}) if ffmpeg_profile_name else {}
@@ -280,7 +371,8 @@ def create_app(config: dict) -> Flask:
             if not ffmpeg_profile:
                 abort(500, description=f"FFmpeg profile '{ffmpeg_profile_name}' not found for stream {stream_id}.")
 
-        process = ffmpeg_utils.get_or_start_stream_process(stream_config, ffmpeg_profile)
+        process_variant = variant_name if variant_config else None
+        process = ffmpeg_utils.get_or_start_stream_process(selected_stream_config, ffmpeg_profile, process_variant=process_variant)
 
         if not process:
             abort(500, description=f"Failed to start FFmpeg for stream {stream_id}.")
@@ -303,6 +395,28 @@ def create_app(config: dict) -> Flask:
 
         # MPEG-TS is the transport stream format specified in ffmpeg_profiles
         return Response(generate_chunks(), mimetype='video/mp2t')
+
+    @app.route('/epg.xml')
+    def xmltv():
+        """Outputs an XMLTV feed generated from configured schedules."""
+
+        stream_map = app.config.get('stream_map', {})
+        region = extract_region_from_request(request)
+        groups = parse_group_filter(request.args.get('group'))
+        ids = parse_id_filter(request.args.get('ids'))
+
+        base_query = {}
+        if region:
+            base_query['region'] = region
+
+        annotated_streams = []
+        for stream in filter_streams(stream_map.values(), region, groups, ids):
+            stream_copy = copy.deepcopy(stream)
+            stream_copy['_stream_url'] = build_stream_url(stream['id'], base_query)
+            annotated_streams.append(stream_copy)
+
+        xml_payload = build_xmltv(annotated_streams)
+        return Response(xml_payload, mimetype='application/xml')
 
     @app.route('/metrics')
     def metrics():
