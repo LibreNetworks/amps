@@ -14,8 +14,9 @@ except ImportError:  # pragma: no cover - dependency should be installed, but gu
     yt_dlp = None
 
 # Global dictionary to hold running FFmpeg processes and associated data
-# Structure: { stream_id: {'process': Popen_object, 'lock': Lock_object} }
-RUNNING_PROCESSES: Dict[int, Dict] = {}
+# Structure: { (stream_id, variant): {'process': Popen_object, 'lock': Lock_object} }
+RUNNING_PROCESSES: Dict[Tuple[int, str], Dict] = {}
+DEFAULT_VARIANT_KEY = 'default'
 
 
 def _resolve_stream_source(stream_config: dict) -> Tuple[Optional[str], Dict[str, Any]]:
@@ -154,7 +155,11 @@ def _log_stderr(stream_name: str, stderr_pipe):
     for line in iter(stderr_pipe.readline, b''):
         logging.getLogger('ffmpeg').info(f"[{stream_name}] {line.decode('utf-8').strip()}")
 
-def get_or_start_stream_process(stream_config: dict, ffmpeg_profile: dict) -> Optional[subprocess.Popen]:
+def get_or_start_stream_process(
+    stream_config: dict,
+    ffmpeg_profile: dict,
+    process_variant: Optional[str] = None,
+) -> Optional[subprocess.Popen]:
     """
     Retrieves a running FFmpeg process for a stream or starts a new one.
     This function is thread-safe.
@@ -163,23 +168,31 @@ def get_or_start_stream_process(stream_config: dict, ffmpeg_profile: dict) -> Op
     stream_name = stream_config.get('name', f"Stream {stream_id}")
 
     # Initialize stream entry if not present
-    if stream_id not in RUNNING_PROCESSES:
-        RUNNING_PROCESSES[stream_id] = {
+    variant_key = process_variant or DEFAULT_VARIANT_KEY
+    process_key = (stream_id, variant_key)
+
+    if process_key not in RUNNING_PROCESSES:
+        RUNNING_PROCESSES[process_key] = {
             'process': None,
             'lock': threading.Lock()
         }
 
-    with RUNNING_PROCESSES[stream_id]['lock']:
-        proc_data = RUNNING_PROCESSES[stream_id]
+    with RUNNING_PROCESSES[process_key]['lock']:
+        proc_data = RUNNING_PROCESSES[process_key]
         process = proc_data.get('process')
 
         # Check if process exists and is running
         if process and process.poll() is None:
-            logging.info(f"Returning existing FFmpeg process for stream '{stream_name}' (PID: {process.pid})")
+            logging.info(
+                "Returning existing FFmpeg process for stream '%s' (variant=%s, PID=%s)",
+                stream_name,
+                variant_key,
+                process.pid,
+            )
             return process
 
         # If process is dead or doesn't exist, start a new one
-        logging.info(f"Starting new FFmpeg process for stream '{stream_name}'")
+        logging.info("Starting new FFmpeg process for stream '%s' (variant=%s)", stream_name, variant_key)
         try:
             custom_command = _prepare_custom_ffmpeg_command(stream_config)
 
@@ -194,7 +207,12 @@ def get_or_start_stream_process(stream_config: dict, ffmpeg_profile: dict) -> Op
                     env=env,
                     cwd=cwd,
                 )
-                logging.info(f"Custom FFmpeg process started for '{stream_name}' with PID: {process.pid}")
+                logging.info(
+                    "Custom FFmpeg process started for '%s' (variant=%s) with PID: %s",
+                    stream_name,
+                    variant_key,
+                    process.pid,
+                )
             else:
                 resolved_source, handler_options = _resolve_stream_source(stream_config)
                 if not resolved_source:
@@ -235,7 +253,12 @@ def get_or_start_stream_process(stream_config: dict, ffmpeg_profile: dict) -> Op
                 output_stream = ffmpeg.output(input_stream, 'pipe:1', **ffmpeg_profile)
 
                 process = output_stream.run_async(pipe_stdout=True, pipe_stderr=True)
-                logging.info(f"FFmpeg process started for '{stream_name}' with PID: {process.pid}")
+                logging.info(
+                    "FFmpeg process started for '%s' (variant=%s) with PID: %s",
+                    stream_name,
+                    variant_key,
+                    process.pid,
+                )
 
             # Start a thread to log stderr for this process
             stderr_thread = threading.Thread(
@@ -255,31 +278,45 @@ def get_or_start_stream_process(stream_config: dict, ffmpeg_profile: dict) -> Op
             logging.error(f"Failed to start FFmpeg for stream '{stream_name}': {e}")
             return None
 
-def stop_stream_process(stream_id: int):
+def stop_stream_process(stream_id: int, process_variant: Optional[str] = None):
     """
     Stops a specific FFmpeg process if it is running.
     """
-    if stream_id in RUNNING_PROCESSES:
-        with RUNNING_PROCESSES[stream_id]['lock']:
-            proc_data = RUNNING_PROCESSES.pop(stream_id)
+    keys = [
+        key for key in list(RUNNING_PROCESSES.keys())
+        if key[0] == stream_id and (process_variant is None or key[1] == process_variant)
+    ]
+
+    for key in keys:
+        with RUNNING_PROCESSES[key]['lock']:
+            proc_data = RUNNING_PROCESSES.pop(key)
             process = proc_data.get('process')
             if process and process.poll() is None:
-                logging.warning(f"Terminating FFmpeg process for stream ID {stream_id} (PID: {process.pid})")
+                logging.warning(
+                    "Terminating FFmpeg process for stream ID %s variant '%s' (PID: %s)",
+                    stream_id,
+                    key[1],
+                    process.pid,
+                )
                 process.terminate()
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     logging.error(f"FFmpeg process {process.pid} did not terminate gracefully, killing.")
                     process.kill()
-                logging.info(f"Process for stream ID {stream_id} stopped.")
+                logging.info(
+                    "Process for stream ID %s variant '%s' stopped.",
+                    stream_id,
+                    key[1],
+                )
 
 def cleanup_all_processes():
     """
     Cleans up all running FFmpeg processes on application exit.
     """
     logging.info("Shutting down all active FFmpeg streams...")
-    stream_ids = list(RUNNING_PROCESSES.keys())
-    for stream_id in stream_ids:
+    stream_ids = {key[0] for key in RUNNING_PROCESSES.keys()}
+    for stream_id in list(stream_ids):
         stop_stream_process(stream_id)
     logging.info("Cleanup complete.")
 

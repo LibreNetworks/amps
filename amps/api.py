@@ -2,6 +2,14 @@
 
 from flask import Blueprint, jsonify, request, current_app
 from amps import ffmpeg_utils
+from amps.stream_utils import (
+    extract_region_from_request,
+    filter_streams,
+    parse_group_filter,
+    parse_id_filter,
+    is_stream_allowed_for_region,
+)
+from amps.epg_utils import build_epg_payload
 
 
 ALLOWED_STREAM_FIELDS = {
@@ -21,6 +29,10 @@ ALLOWED_STREAM_FIELDS = {
     'source_handler',
     'use_yt_dlp',
     'yt_dlp_format',
+    'epg_id',
+    'regions_allowed',
+    'regions_blocked',
+    'adaptive_bitrates',
 }
 
 
@@ -112,20 +124,85 @@ def _validate_next_programs(programs):
 
     return True, None
 
+
+def _validate_region_list(field_name: str, regions):
+    if regions is None:
+        return True, None
+
+    if not isinstance(regions, list) or not all(isinstance(region, str) for region in regions):
+        return False, f"{field_name} must be a list of ISO country codes."
+
+    return True, None
+
+
+def _validate_adaptive_bitrates(adaptive_bitrates, ffmpeg_profiles):
+    if adaptive_bitrates is None:
+        return True, None
+
+    if not isinstance(adaptive_bitrates, list):
+        return False, "adaptive_bitrates must be a list of variant objects."
+
+    seen_names = set()
+    for idx, variant in enumerate(adaptive_bitrates):
+        if not isinstance(variant, dict):
+            return False, f"adaptive_bitrates[{idx}] must be an object."
+
+        name = variant.get('name')
+        if not name or not isinstance(name, str):
+            return False, f"adaptive_bitrates[{idx}] requires a string 'name' field."
+
+        if name in seen_names:
+            return False, f"adaptive_bitrates contains duplicate variant name '{name}'."
+        seen_names.add(name)
+
+        profile = variant.get('ffmpeg_profile')
+        if profile and profile not in ffmpeg_profiles:
+            return False, f"adaptive_bitrates[{idx}] references unknown ffmpeg_profile '{profile}'."
+
+        if 'custom_ffmpeg' in variant:
+            valid_custom, custom_error = _validate_custom_ffmpeg(variant.get('custom_ffmpeg'))
+            if not valid_custom:
+                return False, f"adaptive_bitrates[{idx}].custom_ffmpeg: {custom_error}"
+
+        if 'input_options' in variant:
+            valid_input, input_error = _validate_input_options(variant.get('input_options'))
+            if not valid_input:
+                return False, f"adaptive_bitrates[{idx}].input_options: {input_error}"
+
+        if 'input_args' in variant:
+            valid_args, args_error = _validate_input_args(variant.get('input_args'))
+            if not valid_args:
+                return False, f"adaptive_bitrates[{idx}].input_args: {args_error}"
+
+    return True, None
+
 api_bp = Blueprint('api', __name__, url_prefix='/api')
 
 @api_bp.route('/streams', methods=['GET'])
 def get_streams():
     """Returns the list of all configured streams."""
     stream_map = current_app.config.get('stream_map', {})
-    return jsonify(list(stream_map.values()))
+    region = extract_region_from_request(request)
+    groups = parse_group_filter(request.args.get('group'))
+    ids = parse_id_filter(request.args.get('ids'))
+
+    if region or groups or ids:
+        streams = list(filter_streams(stream_map.values(), region, groups, ids))
+    else:
+        streams = list(stream_map.values())
+
+    return jsonify(streams)
 
 @api_bp.route('/streams/<int:stream_id>', methods=['GET'])
 def get_stream(stream_id):
     """Returns a single stream by its ID."""
     stream_map = current_app.config.get('stream_map', {})
-    if stream_id in stream_map:
-        return jsonify(stream_map[stream_id])
+    stream = stream_map.get(stream_id)
+    if stream:
+        region = extract_region_from_request(request)
+        if region and not is_stream_allowed_for_region(stream, region):
+            return jsonify({'error': 'Stream not available in this region'}), 403
+        return jsonify(stream)
     return jsonify({'error': 'Stream not found'}), 404
 
 @api_bp.route('/streams', methods=['POST'])
@@ -175,6 +252,21 @@ def add_stream():
     if not valid_programs:
         return jsonify({'error': programs_error}), 400
 
+    valid_regions, regions_error = _validate_region_list('regions_allowed', new_stream.get('regions_allowed'))
+    if not valid_regions:
+        return jsonify({'error': regions_error}), 400
+
+    valid_block_regions, block_error = _validate_region_list('regions_blocked', new_stream.get('regions_blocked'))
+    if not valid_block_regions:
+        return jsonify({'error': block_error}), 400
+
+    valid_variants, variants_error = _validate_adaptive_bitrates(
+        new_stream.get('adaptive_bitrates'),
+        current_app.config['ffmpeg_profiles'],
+    )
+    if not valid_variants:
+        return jsonify({'error': variants_error}), 400
+
     stream_map[new_id] = new_stream
     return jsonify(new_stream), 201
 
@@ -223,6 +315,24 @@ def update_stream(stream_id):
         valid_programs, programs_error = _validate_next_programs(update_data.get('next_programs'))
         if not valid_programs:
             return jsonify({'error': programs_error}), 400
+
+    if 'regions_allowed' in update_data:
+        valid_regions, regions_error = _validate_region_list('regions_allowed', update_data.get('regions_allowed'))
+        if not valid_regions:
+            return jsonify({'error': regions_error}), 400
+
+    if 'regions_blocked' in update_data:
+        valid_block_regions, block_error = _validate_region_list('regions_blocked', update_data.get('regions_blocked'))
+        if not valid_block_regions:
+            return jsonify({'error': block_error}), 400
+
+    if 'adaptive_bitrates' in update_data:
+        valid_variants, variants_error = _validate_adaptive_bitrates(
+            update_data.get('adaptive_bitrates'),
+            current_app.config['ffmpeg_profiles'],
+        )
+        if not valid_variants:
+            return jsonify({'error': variants_error}), 400
 
     # Stop the old process if source or profile changes
     if any(k in update_data for k in ['source', 'ffmpeg_profile', 'custom_ffmpeg']):
@@ -278,3 +388,16 @@ def manage_programs(stream_id):
 
     stream['next_programs'] = request.json
     return jsonify(stream['next_programs'])
+
+
+@api_bp.route('/epg', methods=['GET'])
+def epg_listing():
+    """Returns the EPG payload for accessible streams."""
+
+    stream_map = current_app.config.get('stream_map', {})
+    region = extract_region_from_request(request)
+    groups = parse_group_filter(request.args.get('group'))
+    ids = parse_id_filter(request.args.get('ids'))
+
+    filtered_streams = list(filter_streams(stream_map.values(), region, groups, ids))
+    return jsonify(build_epg_payload(filtered_streams))

@@ -17,6 +17,7 @@ streams:
   - id: 1
     name: "Sintel (transcoded)"
     tvg_name: "Sintel HD"
+    epg_id: "sintel.hd"
     logo: "https://upload.wikimedia.org/wikipedia/commons/7/70/Sintel_poster.jpg"
     group: "Movies"
     channel_number: 101
@@ -24,6 +25,9 @@ streams:
     source: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4"
     ffmpeg_profile: "copy"
     description: "Behind-the-scenes footage from the Sintel short film."
+    regions_allowed:
+      - US
+      - CA
     next_programs:
       - title: "Director Commentary"
         start: "2024-05-24T19:30:00Z"
@@ -31,6 +35,10 @@ streams:
       - title: "Making of Sintel"
         start: "2024-05-24T20:00:00Z"
     program_feed: "https://example.com/amps/sintel/schedule.json"
+    adaptive_bitrates:
+      - name: "sd"
+        label: "Sintel SD"
+        ffmpeg_profile: "low_bitrate"
 
   - id: 2
     name: "Big Buck Bunny (copy)"
@@ -46,6 +54,9 @@ streams:
     custom_ffmpeg:
       command: "ffmpeg -re -i {source} -c copy -metadata service_name='Dolby Atmos Demo' -f mpegts pipe:1"
       shell: false
+    regions_blocked:
+      - CN
+      - RU
 
   - id: 4
     name: "YouTube (yt-dlp)"

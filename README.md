@@ -13,6 +13,9 @@ It's designed to be a developer-friendly, modular, and robust solution for perso
 - **yt-dlp Integration:** Resolve complex streaming services (YouTube, Twitch, etc.) into direct FFmpeg inputs on demand.
 - **YAML Configuration:** All streams and FFmpeg profiles are defined in a simple, human-readable `config.yaml`.
 - **REST API:** A simple API to list, add, update, and delete streams in-memory without restarting the server.
+- **XMLTV + EPG Feed:** Export upcoming programs as XMLTV via `/epg.xml` or JSON through `/api/epg` for guide ingestion.
+- **Adaptive Bitrate Variants:** Configure per-channel variants that swap FFmpeg profiles on demand for low/high bitrate viewers.
+- **Region Locking:** Allow or block specific ISO country codes per channel and automatically filter playlists by region.
 - **Upcoming Programming:** Attach next-up schedules to channels and retrieve them through the API for live program feeds.
 - **Custom FFmpeg Pipelines:** Override the FFmpeg command per channel when you need full control over how the stream is produced.
 - **Protocol-Friendly Inputs:** Add FFmpeg input options to unlock RTMP, DVB/IP, DTV, multicast and other specialised transports.
@@ -107,8 +110,30 @@ The playlist includes extended metadata when available:
 - `#EXTREM:AMP-NEXT` lines for the next scheduled program (title, start time, description).
 - `#EXTREM:AMP-PROGRAM-FEED` linking to external schedule feeds.
 - `#EXTREM:AMP-DESCRIPTION` containing rich channel descriptions.
+- `#EXTREM:AMP-VARIANT` entries that describe the adaptive bitrate rendition served by the URL.
+- `#EXTREM:AMP-REGION` hints showing the allow/block lists applied to the channel.
 
 Players that ignore custom tags will safely skip them, while companion applications can parse them for richer experiences.
+
+#### Dynamic filters
+
+`/playlist.m3u` now responds to optional query parameters so you can build targeted line-ups:
+
+| Parameter | Description |
+| --- | --- |
+| `region` | Two-letter ISO code (`US`, `GB`, ...). Also accepted via headers `X-Amps-Region`, `CF-IPCountry`, or `X-Region`. Streams are hidden if the viewer is outside their allow-list. |
+| `group` | Comma-separated group titles. Only matching channels remain. |
+| `ids` | Comma-separated channel IDs for ad-hoc playlists. |
+| `variants` | Set to `false` to hide adaptive bitrate variants from the playlist. |
+
+The generated stream URLs already include the auth token and the `region` code so media players can pass the same restrictions to `/stream/<id>`.
+
+### XMLTV + EPG feeds
+
+- `/epg.xml` emits an XMLTV feed derived from every channel's `next_programs` list.
+- `/api/epg` returns the same guide data in JSON for dashboards.
+
+Both endpoints understand the same `region`, `group`, and `ids` filters as the playlist route, allowing per-market exports.
 
 ## Stream Configuration Reference
 
@@ -122,12 +147,16 @@ Each entry in the `streams` list accepts the following keys:
 | `ffmpeg_profile` | ✅* | Name of a profile defined under `ffmpeg_profiles`. Required unless `custom_ffmpeg` is supplied. |
 | `custom_ffmpeg` | ✅* | Optional override to launch a bespoke FFmpeg command instead of a profile. Accepts a string or mapping with `command`, `shell`, `cwd`, and `env` fields. The `{source}`, `{id}`, and `{name}` placeholders are expanded. |
 | `tvg_name` | | Alternate guide name used in playlist metadata. |
+| `epg_id` | | Override the XMLTV/playlist identifier (defaults to the numeric `id`). |
 | `logo` | | URL to the channel logo. |
 | `group` | | Logical group title for player UIs. |
 | `channel_number` | | Numeric channel identifier for compatible players. |
 | `description` | | Long-form description inserted as a custom playlist tag. |
 | `program_feed` | | URL to an external schedule feed for companion apps. |
 | `next_programs` | | List of upcoming program objects with at least a `title`, plus optional `start` and `description` fields. |
+| `regions_allowed` | | List of ISO country codes that are allowed to view the stream. |
+| `regions_blocked` | | List of ISO country codes that are denied while the rest remain accessible. |
+| `adaptive_bitrates` | | List of variant definitions for adaptive bitrate playback. |
 | `use_yt_dlp` | | Convenience flag to resolve `source` with yt-dlp before launching FFmpeg. |
 | `yt_dlp_format` | | Override the yt-dlp format selector (defaults to `best`). |
 | `source_handler` | | Advanced yt-dlp configuration mapping (`type: yt_dlp`, optional `format`, `options`, ...). |
@@ -184,6 +213,16 @@ Use `input_args` for flags that do not take values as key-value pairs:
 ```
 
 These controls make it straightforward to connect to RTMP, DVB-IP, DTV, or other specialised transports without falling back to a full custom command.
+
+### Adaptive bitrate variants
+
+Define variants under `adaptive_bitrates` to expose alternate FFmpeg profiles (for example, a low bitrate copy for mobile viewers). Every variant requires a unique `name` and can optionally include `label`, `ffmpeg_profile`, `custom_ffmpeg`, `source`, `input_options`, or `input_args` overrides. The playlist will automatically append entries such as `Channel Name (SD)` that point to `/stream/<id>?variant=sd`.
+
+Clients that prefer a specific rendition can either play the `variant` entry from the playlist or add `?variant=<name>` when calling the `/stream/<id>` endpoint directly.
+
+### Region locking
+
+Set `regions_allowed` or `regions_blocked` on any stream to restrict playback. The server inspects the `region` query parameter first, then a few common CDN headers (`X-Amps-Region`, `X-Region`, `CF-IPCountry`, `X-Appengine-Country`). If a viewer's region does not satisfy the constraints, both the playlist and `/stream/<id>` return a 403 response for that channel.
 
 ### Scheduled Streams
 
