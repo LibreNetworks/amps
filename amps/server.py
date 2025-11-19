@@ -9,7 +9,7 @@ from typing import Optional
 from urllib.parse import urlencode
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, Response, request, abort, url_for, jsonify
+from flask import Flask, Response, request, abort, url_for, jsonify, send_from_directory
 
 from amps import ffmpeg_utils
 from amps.api import api_bp
@@ -76,6 +76,7 @@ def create_app(config: dict) -> Flask:
     app.config.update(config)
     app.config.setdefault('stream_map', {})
     app.config.setdefault('scheduled_streams', [])
+    app.config.setdefault('media_root', str(ffmpeg_utils.OUTPUT_BASE))
 
     # Register API blueprint
     app.register_blueprint(api_bp)
@@ -223,6 +224,12 @@ def create_app(config: dict) -> Flask:
         if query_params:
             return f"{stream_url}?{urlencode(query_params)}"
         return stream_url
+
+    def _static_manifest_response(stream_id: int, variant_key: str, filename: str):
+        base = ffmpeg_utils.OUTPUT_BASE / str(stream_id) / variant_key
+        if not base.exists():
+            abort(404, description=f"No generated output for stream {stream_id} variant {variant_key}.")
+        return send_from_directory(base, filename)
 
     @app.before_request
     def auth_middleware():
@@ -395,6 +402,46 @@ def create_app(config: dict) -> Flask:
 
         # MPEG-TS is the transport stream format specified in ffmpeg_profiles
         return Response(generate_chunks(), mimetype='video/mp2t')
+
+    @app.route('/hls/<int:stream_id>/<path:filename>')
+    def hls_manifest(stream_id, filename):
+        return _static_manifest_response(stream_id, 'hls', filename)
+
+    @app.route('/dash/<int:stream_id>/<path:filename>')
+    def dash_manifest(stream_id, filename):
+        return _static_manifest_response(stream_id, 'dash', filename)
+
+    @app.route('/audio/<int:stream_id>')
+    def audio_only(stream_id):
+        stream_map = app.config.get('stream_map', {})
+        stream_config = stream_map.get(stream_id)
+        if not stream_config:
+            abort(404, description=f"Stream with ID {stream_id} not found.")
+
+        audio_config = copy.deepcopy(stream_config)
+        audio_config['ffmpeg_profile'] = stream_config.get('ffmpeg_profile')
+        audio_config['output_format'] = 'audio'
+
+        ffmpeg_profiles = app.config.get('ffmpeg_profiles', {})
+        profile = ffmpeg_profiles.get(audio_config['ffmpeg_profile'], {})
+        audio_profile = dict(profile)
+        audio_profile.setdefault('audio_only', True)
+        audio_profile.setdefault('output_format', 'audio')
+
+        process = ffmpeg_utils.get_or_start_stream_process(audio_config, audio_profile, process_variant='audio')
+        if not process:
+            abort(500, description=f"Failed to start FFmpeg for stream {stream_id} (audio).")
+
+        def generate_audio():
+            try:
+                for chunk in iter(lambda: process.stdout.read(4096), b''):
+                    if not chunk:
+                        break
+                    yield chunk
+            except Exception as exc:  # pragma: no cover - stream interruptions
+                logging.error("Audio streaming error for %s: %s", stream_id, exc)
+
+        return Response(generate_audio(), mimetype='audio/aac')
 
     @app.route('/epg.xml')
     def xmltv():

@@ -10,6 +10,8 @@ It's designed to be a developer-friendly, modular, and robust solution for perso
 
 - **Dynamic M3U Playlists:** Serves a `/playlist.m3u` file compatible with most media players (VLC, Kodi, etc.) complete with channel names, logos, and custom metadata.
 - **FFmpeg Engine:** Relays streams (`copy` codec) or transcodes them on-the-fly to different bitrates, resolutions, or formats.
+- **Multi-Protocol Outputs:** Generate HLS (and LL-HLS), MPEG-DASH, RTSP, or raw TS outputs from the same FFmpeg process.
+- **Static Manifests:** HLS playlists and DASH manifests are written to a temp media directory and served via `/hls/<id>/index.m3u8` and `/dash/<id>/manifest.mpd`.
 - **yt-dlp Integration:** Resolve complex streaming services (YouTube, Twitch, etc.) into direct FFmpeg inputs on demand.
 - **YAML Configuration:** All streams and FFmpeg profiles are defined in a simple, human-readable `config.yaml`.
 - **REST API:** A simple API to list, add, update, and delete streams in-memory without restarting the server.
@@ -19,6 +21,7 @@ It's designed to be a developer-friendly, modular, and robust solution for perso
 - **Upcoming Programming:** Attach next-up schedules to channels and retrieve them through the API for live program feeds.
 - **Custom FFmpeg Pipelines:** Override the FFmpeg command per channel when you need full control over how the stream is produced.
 - **Protocol-Friendly Inputs:** Add FFmpeg input options to unlock RTMP, DVB/IP, DTV, multicast and other specialised transports.
+- **Audio-Only Endpoints:** Expose lightweight AAC outputs at `/audio/<id>` for radio or podcast-style listening.
 - **Token Authentication:** Secure your streams with a shared token, passed via headers or URL parameters.
 - **Robust Process Management:** Automatically restarts broken streams on request and gracefully cleans up FFmpeg processes on shutdown.
 - **Containerized:** Includes a `Dockerfile` for easy, production-ready deployment.
@@ -128,6 +131,19 @@ Players that ignore custom tags will safely skip them, while companion applicati
 
 The generated stream URLs already include the auth token and the `region` code so media players can pass the same restrictions to `/stream/<id>`.
 
+### Static HLS/DASH Manifests
+
+When a stream uses an HLS or DASH output profile, manifests and media segments are written to a temporary directory (by default under your OS temp root). They are automatically served by Flask using the following routes:
+
+- `http://<server_ip>:5000/hls/<id>/index.m3u8` (LL-HLS uses the same path with different flags)
+- `http://<server_ip>:5000/dash/<id>/manifest.mpd`
+
+The base temp directory can be overridden via `media_root` in `config.yaml`. Each stream/variant gets its own subfolder, allowing multiple clients to reuse the same FFmpeg process.
+
+### Audio-Only Output
+
+Every stream can also be listened to in audio-only form. The `/audio/<id>` endpoint starts (or reuses) an FFmpeg process that strips the video track and outputs AAC by default. This is useful for low-bandwidth scenarios or podcast-style playback.
+
 ### XMLTV + EPG feeds
 
 - `/epg.xml` emits an XMLTV feed derived from every channel's `next_programs` list.
@@ -162,6 +178,10 @@ Each entry in the `streams` list accepts the following keys:
 | `source_handler` | | Advanced yt-dlp configuration mapping (`type: yt_dlp`, optional `format`, `options`, ...). |
 | `input_options` | | Mapping of keyword arguments passed to `ffmpeg.input` (e.g. `protocol_whitelist`, `rtmp_live`). |
 | `input_args` | | Additional positional arguments for `ffmpeg.input` enabling flags such as `-stream_loop`. |
+| `output_format` | | Target container for the stream (`ts`, `hls`, `ll-hls`, `dash`, `rtsp`, or `audio`). Defaults to MPEG-TS. |
+| `ll_hls` | | When `true`, enables low-latency HLS flags for HLS outputs. |
+| `audio_only` | | Forces the FFmpeg output to drop the video track and encode audio (defaults to AAC). Used by `/audio/<id>`. |
+| `hwaccel` | | Optional hardware acceleration block (e.g., `type: nvidia`, `device: 0`). Adds `-hwaccel`/`-hwaccel_device` flags. |
 
 > ℹ️ Provide either `ffmpeg_profile` or `custom_ffmpeg`. When both are supplied, the profile is still available for reference but the custom command takes precedence.
 
@@ -180,6 +200,7 @@ Each entry in the `streams` list accepts the following keys:
   use_yt_dlp: true
   input_options:
     protocol_whitelist: "file,http,https,tcp,tls,crypto"
+  output_format: hls
 ```
 
 For more control, switch to the richer `source_handler` form:

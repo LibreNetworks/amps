@@ -2,10 +2,13 @@
 
 import ffmpeg
 import logging
+import shutil
 import subprocess
+import tempfile
 import threading
 import atexit
 import shlex
+from pathlib import Path
 from typing import Dict, Optional, Tuple, Union, List, Any
 
 try:
@@ -17,6 +20,8 @@ except ImportError:  # pragma: no cover - dependency should be installed, but gu
 # Structure: { (stream_id, variant): {'process': Popen_object, 'lock': Lock_object} }
 RUNNING_PROCESSES: Dict[Tuple[int, str], Dict] = {}
 DEFAULT_VARIANT_KEY = 'default'
+OUTPUT_BASE = Path(tempfile.gettempdir()) / 'amps_media'
+OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
 
 def _resolve_stream_source(stream_config: dict) -> Tuple[Optional[str], Dict[str, Any]]:
@@ -148,6 +153,98 @@ def _prepare_custom_ffmpeg_command(stream_config: dict) -> Optional[Tuple[Union[
 
     return command, shell, env, cwd
 
+
+def _build_output_path(stream_id: int, variant_key: str, filename: str) -> Path:
+    """Constructs a deterministic output path for generated manifests and segments."""
+
+    target_dir = OUTPUT_BASE / str(stream_id) / variant_key
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir / filename
+
+
+def _clean_output_path(path: Path):
+    """Removes stale output for a variant before starting a new process."""
+
+    if path.exists():
+        try:
+            if path.is_file():
+                path.unlink()
+            else:
+                shutil.rmtree(path)
+        except OSError:
+            # Best-effort cleanup; continue even if deletion fails.
+            logging.debug("Failed to clean previous output at %s", path)
+
+
+def _apply_hwaccel(input_stream, hwaccel_conf: Optional[dict]):
+    """Adds hardware acceleration arguments when requested."""
+
+    if not hwaccel_conf:
+        return input_stream, []
+
+    hw_type = hwaccel_conf.get('type')
+    if not hw_type:
+        return input_stream, []
+
+    extra_global_args = []
+    if hw_type == 'nvidia':
+        extra_global_args.extend(['-hwaccel', 'cuda'])
+    elif hw_type == 'vaapi':
+        extra_global_args.extend(['-hwaccel', 'vaapi'])
+    elif hw_type == 'videotoolbox':
+        extra_global_args.extend(['-hwaccel', 'videotoolbox'])
+
+    device = hwaccel_conf.get('device')
+    if device:
+        extra_global_args.extend(['-hwaccel_device', str(device)])
+
+    return input_stream, extra_global_args
+
+
+def _build_hls_output(stream_id: int, variant_key: str, ffmpeg_kwargs: dict, ll_hls: bool = False) -> Tuple[str, Dict[str, Any]]:
+    """Prepares an HLS/LL-HLS output configuration."""
+
+    playlist_path = _build_output_path(stream_id, variant_key, 'index.m3u8')
+    _clean_output_path(playlist_path.parent)
+    hls_flags = ffmpeg_kwargs.pop('hls_flags', '')
+    if ll_hls:
+        extra_flags = 'delete_segments+append_list+omit_endlist+program_date_time'
+    else:
+        extra_flags = 'delete_segments+omit_endlist'
+    combined_flags = '+'.join(flag for flag in [hls_flags, extra_flags] if flag)
+
+    output_kwargs = {
+        'format': 'hls',
+        'hls_time': ffmpeg_kwargs.pop('hls_time', 4),
+        'hls_list_size': ffmpeg_kwargs.pop('hls_list_size', 0),
+        'hls_flags': combined_flags,
+        'strftime': ffmpeg_kwargs.pop('strftime', 0),
+    }
+    output_kwargs.update(ffmpeg_kwargs)
+    return str(playlist_path), output_kwargs
+
+
+def _build_dash_output(stream_id: int, variant_key: str, ffmpeg_kwargs: dict) -> Tuple[str, Dict[str, Any]]:
+    """Prepares DASH output configuration."""
+
+    manifest_path = _build_output_path(stream_id, variant_key, 'manifest.mpd')
+    _clean_output_path(manifest_path.parent)
+    output_kwargs = {
+        'format': 'dash',
+        'seg_duration': ffmpeg_kwargs.pop('seg_duration', 4),
+        'remove_at_exit': ffmpeg_kwargs.pop('remove_at_exit', 1),
+    }
+    output_kwargs.update(ffmpeg_kwargs)
+    return str(manifest_path), output_kwargs
+
+
+def _build_audio_only_kwargs(ffmpeg_kwargs: dict) -> Dict[str, Any]:
+    audio_kwargs = {'vn': None}
+    audio_codec = ffmpeg_kwargs.pop('acodec', None) or 'aac'
+    audio_kwargs['acodec'] = audio_codec
+    audio_kwargs.update(ffmpeg_kwargs)
+    return audio_kwargs
+
 def _log_stderr(stream_name: str, stderr_pipe):
     """
     Reads from a process's stderr pipe and logs each line for debugging.
@@ -250,7 +347,38 @@ def get_or_start_stream_process(
                 )
 
                 input_stream = ffmpeg.input(resolved_source, *input_args, **input_kwargs)
-                output_stream = ffmpeg.output(input_stream, 'pipe:1', **ffmpeg_profile)
+
+                ffmpeg_options = dict(ffmpeg_profile)
+
+                hwaccel_conf = ffmpeg_options.pop('hwaccel', None)
+                input_stream, extra_global_args = _apply_hwaccel(input_stream, hwaccel_conf)
+
+                audio_only = ffmpeg_options.pop('audio_only', False)
+                ll_hls = ffmpeg_options.pop('ll_hls', False)
+                output_format = ffmpeg_options.pop('output_format', 'ts')
+
+                output_kwargs = dict(ffmpeg_options)
+                output_target = 'pipe:1'
+
+                if audio_only:
+                    output_kwargs = _build_audio_only_kwargs(output_kwargs)
+
+                if output_format in {'hls', 'll-hls'}:
+                    output_target, format_kwargs = _build_hls_output(stream_id, variant_key, output_kwargs, ll_hls=(output_format == 'll-hls'))
+                    output_kwargs = format_kwargs
+                elif output_format == 'dash':
+                    output_target, format_kwargs = _build_dash_output(stream_id, variant_key, output_kwargs)
+                    output_kwargs = format_kwargs
+                elif output_format == 'rtsp':
+                    # RTSP output requires a URL; we expose a unix socket style path for demo purposes.
+                    output_target = f"rtsp://127.0.0.1:8554/stream_{stream_id}_{variant_key}"
+                elif output_format == 'audio':
+                    output_target = 'pipe:1'
+                    output_kwargs = _build_audio_only_kwargs(output_kwargs)
+
+                output_stream = ffmpeg.output(input_stream, output_target, **output_kwargs)
+                if extra_global_args:
+                    output_stream = output_stream.global_args(*extra_global_args)
 
                 process = output_stream.run_async(pipe_stdout=True, pipe_stderr=True)
                 logging.info(
