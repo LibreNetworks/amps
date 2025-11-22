@@ -1,4 +1,11 @@
-# ⚡ Amps – Advanced Media Playlist Server
+<div style="
+  display: flex;
+  justify-content: center;
+">
+  <img src="/assets/logo.svg" height="140" alt="The logo with a dark blue lightning bolt, combined with the text in the Rubik font saying Amps.">
+</div>
+<hr>
+
 
 **Amps** is a Flask-based server that dynamically generates and serves `.m3u` playlists, relays or transcodes media streams using **FFmpeg**, and allows for easy configuration through a `config.yaml` file.
 
