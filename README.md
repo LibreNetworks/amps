@@ -5,6 +5,7 @@
   <img src="/assets/logo.svg" height="140" alt="The logo with a dark blue lightning bolt, combined with the text in the Rubik font saying Amps.">
 </div>
 <hr>
+
 [Visit the project website](https://calmhostacct.github.io/amps)
 
 **Amps** is a Flask-based server that dynamically generates and serves `.m3u` playlists, relays or transcodes media streams using **FFmpeg**, and allows for easy configuration through a `config.yaml` file.
