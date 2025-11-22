@@ -256,6 +256,7 @@ def get_or_start_stream_process(
     stream_config: dict,
     ffmpeg_profile: dict,
     process_variant: Optional[str] = None,
+    allow_overlap: bool = True,
 ) -> Optional[subprocess.Popen]:
     """
     Retrieves a running FFmpeg process for a stream or starts a new one.
@@ -280,13 +281,26 @@ def get_or_start_stream_process(
 
         # Check if process exists and is running
         if process and process.poll() is None:
-            logging.info(
-                "Returning existing FFmpeg process for stream '%s' (variant=%s, PID=%s)",
-                stream_name,
-                variant_key,
-                process.pid,
-            )
-            return process
+            if not allow_overlap:
+                logging.info(
+                    "Restarting FFmpeg process for stream '%s' (variant=%s) to avoid overlap",
+                    stream_name,
+                    variant_key,
+                )
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                proc_data['process'] = None
+            else:
+                logging.info(
+                    "Returning existing FFmpeg process for stream '%s' (variant=%s, PID=%s)",
+                    stream_name,
+                    variant_key,
+                    process.pid,
+                )
+                return process
 
         # If process is dead or doesn't exist, start a new one
         logging.info("Starting new FFmpeg process for stream '%s' (variant=%s)", stream_name, variant_key)

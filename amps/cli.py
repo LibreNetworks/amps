@@ -2,7 +2,9 @@
 
 import click
 import logging
+import subprocess
 import sys
+from urllib.parse import urlencode
 from amps import __version__
 from amps.config_loader import load_config
 from amps.server import create_app
@@ -161,6 +163,44 @@ def update_command(repo):
     if result.stdout:
         click.echo(result.stdout)
     click.echo("Update complete. Run `amps --version` to verify the installed version.")
+
+
+@main_cli.command('vlc')
+@click.argument('stream_id', type=int)
+@click.option('--config', default='config.yaml', help='Path to the YAML configuration file.', type=click.Path(exists=True))
+@click.option('--variant', help='Adaptive bitrate variant name to request.')
+@click.option('--no-overlap', is_flag=True, help='Restart the FFmpeg process for this stream instead of reusing it.')
+def vlc_command(stream_id, config, variant, no_overlap):
+    """Launches VLC pointed at a configured stream."""
+
+    app_config = load_config(config)
+    server_conf = app_config['server']
+    host = server_conf['host']
+    port = server_conf['port']
+
+    # Prefer a localhost-friendly host when binding to all interfaces.
+    if host in {'0.0.0.0', '::'}:
+        host = '127.0.0.1'
+
+    query_params = {}
+    auth_conf = app_config.get('auth', {})
+    if auth_conf.get('enabled'):
+        query_params['token'] = auth_conf.get('token')
+
+    if variant:
+        query_params['variant'] = variant
+
+    if no_overlap:
+        query_params['overlap'] = 'false'
+
+    query_string = f"?{urlencode(query_params)}" if query_params else ''
+    stream_url = f"http://{host}:{port}/stream/{stream_id}{query_string}"
+
+    click.echo(f"Starting VLC with URL: {stream_url}")
+    try:
+        subprocess.run(['vlc', stream_url], check=False)
+    except FileNotFoundError:
+        raise click.ClickException('VLC is not installed or not found in PATH.')
 
 if __name__ == '__main__':
     main_cli()

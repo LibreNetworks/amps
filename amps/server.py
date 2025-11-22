@@ -369,6 +369,8 @@ def create_app(config: dict) -> Flask:
         custom_ffmpeg = selected_stream_config.get('custom_ffmpeg')
         ffmpeg_profile_name = selected_stream_config.get('ffmpeg_profile')
 
+        allow_overlap = request.args.get('overlap', 'true').lower() not in {'false', '0', 'no'}
+
         if custom_ffmpeg:
             ffmpeg_profile = app.config['ffmpeg_profiles'].get(ffmpeg_profile_name, {}) if ffmpeg_profile_name else {}
         else:
@@ -379,7 +381,12 @@ def create_app(config: dict) -> Flask:
                 abort(500, description=f"FFmpeg profile '{ffmpeg_profile_name}' not found for stream {stream_id}.")
 
         process_variant = variant_name if variant_config else None
-        process = ffmpeg_utils.get_or_start_stream_process(selected_stream_config, ffmpeg_profile, process_variant=process_variant)
+        process = ffmpeg_utils.get_or_start_stream_process(
+            selected_stream_config,
+            ffmpeg_profile,
+            process_variant=process_variant,
+            allow_overlap=allow_overlap,
+        )
 
         if not process:
             abort(500, description=f"Failed to start FFmpeg for stream {stream_id}.")
@@ -428,7 +435,14 @@ def create_app(config: dict) -> Flask:
         audio_profile.setdefault('audio_only', True)
         audio_profile.setdefault('output_format', 'audio')
 
-        process = ffmpeg_utils.get_or_start_stream_process(audio_config, audio_profile, process_variant='audio')
+        allow_overlap = request.args.get('overlap', 'true').lower() not in {'false', '0', 'no'}
+
+        process = ffmpeg_utils.get_or_start_stream_process(
+            audio_config,
+            audio_profile,
+            process_variant='audio',
+            allow_overlap=allow_overlap,
+        )
         if not process:
             abort(500, description=f"Failed to start FFmpeg for stream {stream_id} (audio).")
 

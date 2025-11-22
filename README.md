@@ -91,6 +91,14 @@ amps update
 
 Add the `--repo` flag to point at a fork (format: `owner/repo`).
 
+### Launching streams in VLC
+
+Use the CLI helper to open a configured stream directly in VLC (includes tokens and optional variant/overlap flags):
+
+```bash
+amps vlc 2 --variant sd --no-overlap
+```
+
 ### 3. Docker Deployment (recommended for production)
 
 1.  **Configure `config.yaml`:**
@@ -135,6 +143,14 @@ The playlist includes extended metadata when available:
 - `#EXTREM:AMP-REGION` hints showing the allow/block lists applied to the channel.
 
 Players that ignore custom tags will safely skip them, while companion applications can parse them for richer experiences.
+
+#### Controlling FFmpeg overlap
+
+By default, `/stream/<id>` reuses the existing FFmpeg process for that stream. Append `overlap=false` when you want a fresh process (for example, after changing upstream inputs):
+
+```bash
+curl -L "http://localhost:5000/stream/1?token=changeme123&overlap=false" > /tmp/stream.ts
+```
 
 #### Dynamic filters
 
