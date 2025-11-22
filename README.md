@@ -81,6 +81,16 @@ Amps consists of several key components:
     python -m amps serve
     ```
 
+### Updating
+
+Amps can self-update to the latest GitHub release with:
+
+```bash
+amps update
+```
+
+Add the `--repo` flag to point at a fork (format: `owner/repo`).
+
 ### 3. Docker Deployment (recommended for production)
 
 1.  **Configure `config.yaml`:**
