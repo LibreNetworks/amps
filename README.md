@@ -131,6 +131,8 @@ Players that ignore custom tags will safely skip them, while companion applicati
 
 The generated stream URLs already include the auth token and the `region` code so media players can pass the same restrictions to `/stream/<id>`.
 
+Add `overlap=true` to a `/stream/<id>` request when you want to spawn a dedicated FFmpeg process for that client without interrupting any existing viewers. The extra process is torn down as soon as the overlapping client disconnects.
+
 ### Static HLS/DASH Manifests
 
 When a stream uses an HLS or DASH output profile, manifests and media segments are written to a temporary directory (by default under your OS temp root). They are automatically served by Flask using the following routes:
@@ -150,6 +152,12 @@ Every stream can also be listened to in audio-only form. The `/audio/<id>` endpo
 - `/api/epg` returns the same guide data in JSON for dashboards.
 
 Both endpoints understand the same `region`, `group`, and `ids` filters as the playlist route, allowing per-market exports.
+
+### Controlling the Server from the CLI
+
+- `amps tuners` shows the currently running FFmpeg processes ("tuners") with their PIDs, variants, and start times.
+- `amps shutdown` asks the server to gracefully stop, cleaning up background jobs and FFmpeg processes.
+- `amps vlc` launches VLC pointing at the playlist or a single channel: `amps vlc --stream-id 4 --region US`.
 
 ## Stream Configuration Reference
 

@@ -1,5 +1,9 @@
 # amps/api.py
 
+import os
+import threading
+import time
+
 from flask import Blueprint, jsonify, request, current_app
 from amps import ffmpeg_utils
 from amps.stream_utils import (
@@ -177,6 +181,22 @@ def _validate_adaptive_bitrates(adaptive_bitrates, ffmpeg_profiles):
     return True, None
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
+
+
+def _initiate_shutdown():
+    """Stops background tasks and exits the process after returning a response."""
+
+    scheduler = current_app.extensions.get('apscheduler')
+    if scheduler and scheduler.running:
+        scheduler.shutdown(wait=False)
+
+    ffmpeg_utils.cleanup_all_processes()
+
+    def _exit_process():
+        time.sleep(0.5)
+        os._exit(0)
+
+    threading.Thread(target=_exit_process, daemon=True).start()
 
 @api_bp.route('/streams', methods=['GET'])
 def get_streams():
@@ -388,6 +408,28 @@ def manage_programs(stream_id):
 
     stream['next_programs'] = request.json
     return jsonify(stream['next_programs'])
+
+
+@api_bp.route('/tuners', methods=['GET'])
+def tuner_status():
+    """Returns the current FFmpeg process map for debugging or monitoring."""
+
+    statuses = ffmpeg_utils.get_process_statuses()
+    active = sum(1 for status in statuses if status['running'])
+    payload = {
+        'tuners': statuses,
+        'active': active,
+        'total': len(statuses),
+    }
+    return jsonify(payload)
+
+
+@api_bp.route('/shutdown', methods=['POST'])
+def shutdown_server():
+    """Stops the scheduler, cleans up FFmpeg, and terminates the server."""
+
+    _initiate_shutdown()
+    return jsonify({'message': 'Server shutdown initiated'}), 202
 
 
 @api_bp.route('/epg', methods=['GET'])

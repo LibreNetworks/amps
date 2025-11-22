@@ -378,8 +378,18 @@ def create_app(config: dict) -> Flask:
             if not ffmpeg_profile:
                 abort(500, description=f"FFmpeg profile '{ffmpeg_profile_name}' not found for stream {stream_id}.")
 
-        process_variant = variant_name if variant_config else None
-        process = ffmpeg_utils.get_or_start_stream_process(selected_stream_config, ffmpeg_profile, process_variant=process_variant)
+        base_variant = variant_name if variant_config else ffmpeg_utils.DEFAULT_VARIANT_KEY
+        overlap_requested = request.args.get('overlap', 'false').lower() in {'true', '1', 'yes'}
+        process_variant = base_variant
+
+        if overlap_requested:
+            process_variant = f"{base_variant}-overlap-{int(time.time() * 1000)}"
+
+        process, actual_variant = ffmpeg_utils.get_or_start_stream_process(
+            selected_stream_config,
+            ffmpeg_profile,
+            process_variant=process_variant,
+        )
 
         if not process:
             abort(500, description=f"Failed to start FFmpeg for stream {stream_id}.")
@@ -397,7 +407,9 @@ def create_app(config: dict) -> Flask:
                 logging.error(f"Error while streaming for stream {stream_id}: {e}")
             finally:
                 logging.info(f"Client disconnected from stream {stream_id}.")
-                # Note: We don't kill the process here, as other clients might be connected.
+                if overlap_requested:
+                    ffmpeg_utils.stop_stream_process(stream_id, process_variant=actual_variant)
+                # Note: We don't kill the shared process for non-overlap streams here, as other clients might be connected.
                 # The process will be restarted on next request if it dies.
 
         # MPEG-TS is the transport stream format specified in ffmpeg_profiles
@@ -428,7 +440,7 @@ def create_app(config: dict) -> Flask:
         audio_profile.setdefault('audio_only', True)
         audio_profile.setdefault('output_format', 'audio')
 
-        process = ffmpeg_utils.get_or_start_stream_process(audio_config, audio_profile, process_variant='audio')
+        process, _ = ffmpeg_utils.get_or_start_stream_process(audio_config, audio_profile, process_variant='audio')
         if not process:
             abort(500, description=f"Failed to start FFmpeg for stream {stream_id} (audio).")
 

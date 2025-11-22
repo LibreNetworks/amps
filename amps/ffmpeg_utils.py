@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import atexit
 import shlex
 from pathlib import Path
@@ -256,7 +257,7 @@ def get_or_start_stream_process(
     stream_config: dict,
     ffmpeg_profile: dict,
     process_variant: Optional[str] = None,
-) -> Optional[subprocess.Popen]:
+) -> Tuple[Optional[subprocess.Popen], str]:
     """
     Retrieves a running FFmpeg process for a stream or starts a new one.
     This function is thread-safe.
@@ -271,7 +272,8 @@ def get_or_start_stream_process(
     if process_key not in RUNNING_PROCESSES:
         RUNNING_PROCESSES[process_key] = {
             'process': None,
-            'lock': threading.Lock()
+            'lock': threading.Lock(),
+            'started_at': None,
         }
 
     with RUNNING_PROCESSES[process_key]['lock']:
@@ -286,7 +288,7 @@ def get_or_start_stream_process(
                 variant_key,
                 process.pid,
             )
-            return process
+            return process, variant_key
 
         # If process is dead or doesn't exist, start a new one
         logging.info("Starting new FFmpeg process for stream '%s' (variant=%s)", stream_name, variant_key)
@@ -316,7 +318,7 @@ def get_or_start_stream_process(
                     logging.error(
                         "Could not resolve an input source for stream '%s'.", stream_name
                     )
-                    return None
+                    return None, variant_key
 
                 input_kwargs: Dict[str, Any] = {}
                 input_kwargs.update(handler_options)
@@ -397,14 +399,34 @@ def get_or_start_stream_process(
             stderr_thread.start()
 
             proc_data['process'] = process
-            return process
+            proc_data['started_at'] = time.time()
+            return process, variant_key
 
         except ffmpeg.Error as e:
             logging.error(f"FFmpeg error for stream '{stream_name}': {e.stderr.decode('utf-8')}")
-            return None
+            return None, variant_key
         except Exception as e:
             logging.error(f"Failed to start FFmpeg for stream '{stream_name}': {e}")
-            return None
+            return None, variant_key
+
+
+def get_process_statuses() -> List[Dict[str, Any]]:
+    """Returns a snapshot of all tracked FFmpeg processes."""
+
+    statuses: List[Dict[str, Any]] = []
+    for (stream_id, variant), data in RUNNING_PROCESSES.items():
+        process = data.get('process')
+        running = process is not None and process.poll() is None
+        statuses.append({
+            'stream_id': stream_id,
+            'variant': variant,
+            'pid': process.pid if process else None,
+            'running': running,
+            'returncode': None if running or not process else process.returncode,
+            'started_at': data.get('started_at'),
+        })
+
+    return sorted(statuses, key=lambda entry: (entry['stream_id'], entry['variant']))
 
 def stop_stream_process(stream_id: int, process_variant: Optional[str] = None):
     """
