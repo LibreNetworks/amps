@@ -35,6 +35,7 @@ It's designed to be a developer-friendly, modular, and robust solution for perso
 - **Containerized:** Includes a `Dockerfile` for easy, production-ready deployment.
 - **CLI Interface:** Manage the server with simple commands like `amps serve` and `amps list`.
 - **Scheduled Streams:** Define time-bound channels that automatically activate and retire using APScheduler.
+- **Plugin Hooks:** Load custom plugins that attach new API endpoints or behaviors without modifying core code.
 
 ## Architecture
 
@@ -168,6 +169,41 @@ Every stream can also be listened to in audio-only form. The `/audio/<id>` endpo
 - `/api/epg` returns the same guide data in JSON for dashboards.
 
 Both endpoints understand the same `region`, `group`, and `ids` filters as the playlist route, allowing per-market exports.
+
+## Plugin System
+
+Amps can load optional plugins so you can extend the API without modifying the core project. Plugins are regular Python modules
+declared in your `config.yaml`:
+
+```yaml
+plugins:
+  - module: "my_company.amps_plugins.webhooks"
+    config:
+      secret: "supersecret"
+  - "simple_plugin"
+```
+
+Each plugin module must expose a `register_plugin` function. The loader first attempts the `(app, api_bp, config)` signature so
+you can attach new API endpoints directly to the existing `/api` blueprint. A fallback `(app, config)` signature is also
+supported for plugins that only need the Flask application context.
+
+Example plugin skeleton:
+
+```python
+def register_plugin(app, api_bp, config):
+    @api_bp.route('/plugins/ping', methods=['GET'])
+    def ping():
+        return {'message': f"pong from {config.get('name', 'example')}"}
+```
+
+When the server starts, it attempts to import and register every declared plugin. You can verify the status with the built-in
+endpoint:
+
+```
+GET /api/plugins
+```
+
+The JSON response reports which modules loaded successfully and any that failed to initialize.
 
 ## Stream Configuration Reference
 

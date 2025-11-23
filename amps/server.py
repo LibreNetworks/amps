@@ -13,6 +13,7 @@ from flask import Flask, Response, request, abort, url_for, jsonify, send_from_d
 
 from amps import ffmpeg_utils
 from amps.api import api_bp
+from amps.plugin_utils import load_plugins
 from amps.stream_utils import (
     extract_region_from_request,
     filter_streams,
@@ -80,6 +81,9 @@ def create_app(config: dict) -> Flask:
 
     # Register API blueprint
     app.register_blueprint(api_bp)
+
+    # Load plugins that can extend the API or app behaviour
+    load_plugins(app, app.config.get('plugins', []), api_bp)
 
     scheduler = BackgroundScheduler()
     scheduler.start()
