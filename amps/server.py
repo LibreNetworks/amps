@@ -9,7 +9,16 @@ from typing import Optional
 from urllib.parse import urlencode
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, Response, request, abort, url_for, jsonify, send_from_directory
+from flask import (
+    Flask,
+    Response,
+    abort,
+    jsonify,
+    render_template,
+    request,
+    send_from_directory,
+    url_for,
+)
 
 from amps import ffmpeg_utils
 from amps.api import api_bp
@@ -234,6 +243,41 @@ def create_app(config: dict) -> Flask:
         if not base.exists():
             abort(404, description=f"No generated output for stream {stream_id} variant {variant_key}.")
         return send_from_directory(base, filename)
+
+    @app.route('/')
+    @app.route('/ui')
+    def ui_dashboard():
+        """Renders a Bootstrap-based control panel for the server."""
+
+        stream_map = app.config.get('stream_map', {})
+        region = extract_region_from_request(request)
+        token = request.args.get('token') or request.headers.get('X-Amps-Token')
+
+        def _link(endpoint, **params):
+            merged = {k: v for k, v in params.items() if v is not None}
+            return url_for(endpoint, _external=True, **merged)
+
+        playlist_url = _link(
+            'generate_playlist',
+            token=token if app.config.get('auth', {}).get('enabled') else None,
+            region=region,
+        )
+        epg_url = _link('xmltv', token=token if app.config.get('auth', {}).get('enabled') else None, region=region)
+        metrics_url = _link('metrics')
+
+        return render_template(
+            'dashboard.html',
+            streams=sorted(stream_map.values(), key=lambda s: s['id']),
+            ffmpeg_profiles=app.config.get('ffmpeg_profiles', {}),
+            token=token,
+            region=region,
+            auth_enabled=app.config.get('auth', {}).get('enabled', False),
+            quick_links={
+                'playlist': playlist_url,
+                'epg': epg_url,
+                'metrics': metrics_url,
+            },
+        )
 
     @app.before_request
     def auth_middleware():
